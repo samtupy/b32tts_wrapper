@@ -200,3 +200,6 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	s->audio = nullptr; // Will be allocated upon next speech segment.
 	return pcm_header? data : data + sizeof(wav_header);
 }
+b32w_export void bst_speech_free(char* data) {
+	free(data);
+}

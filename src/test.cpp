@@ -9,13 +9,13 @@ int main() {
 	FILE* f = fopen("test.wav", "wb");
 	fwrite(data, sizeof(char), size, f);
 	fclose(f);
-	free(data);
+	bst_speech_free(data);
 	PlaySound("test.wav", nullptr, SND_SYNC);
 	data = bst_speak(s, &size, "this is a second test using the same instance");
 	f = fopen("test2.wav", "wb");
 	fwrite(data, sizeof(char), size, f);
 	fclose(f);
-	free(data);
+	bst_speech_free(data);
 	PlaySound("test2.wav", nullptr, SND_SYNC);
 	bst_free(s);
 }
