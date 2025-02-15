@@ -139,14 +139,11 @@ b32w_export const char** bst_voices(int* count) {
 	if (count) *count = bst_voice_count;
 	return bst_voices_buf;
 }
-b32w_export bst_state* bst_init(const char* module_path) {
+bst_state* bst_init_from_hmodule(HMODULE hmod) {
+	if (!hmod) return nullptr;
 	voices_count();
 	bst_state* s = (bst_state*)malloc(sizeof(bst_state));
-	s->dll = LoadLibraryA(module_path);
-	if (!s->dll) {
-		free(s);
-		return nullptr;
-	}
+	s->dll = hmod;
 	s->bstCreate = (bstCreateFunc)GetProcAddress(s->dll, "bstCreate");
 	s->TtsWav = (TtsWavFunc)GetProcAddress(s->dll, "TtsWav");
 	s->bstRelBuf = (bstRelBufFunc)GetProcAddress(s->dll, "bstRelBuf");
@@ -162,6 +159,12 @@ b32w_export bst_state* bst_init(const char* module_path) {
 	}
 	s->bstSetParams(s->tts, BST_BIT_DEPTH_SETTING, 16);
 	return s;
+}
+b32w_export bst_state* bst_init(const char* module_path) {
+	return bst_init_from_hmodule(LoadLibraryA(module_path));
+}
+b32w_export bst_state* bst_init_w(const wchar_t* module_path) {
+	return bst_init_from_hmodule(LoadLibraryW(module_path));
 }
 b32w_export void bst_free(bst_state* s) {
 	if (!s) return;

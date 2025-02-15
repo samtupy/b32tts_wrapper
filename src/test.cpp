@@ -3,7 +3,7 @@
 #include <windows.h>
 
 int main() {
-	bst_state* s = bst_init("b32_tts.dll");
+	bst_state* s = bst_init_w(L"b32_tts.dll");
 	long size;
 	char* data = bst_speak(s, &size, "this is a test", 1, 30);
 	FILE* f = fopen("test.wav", "wb");

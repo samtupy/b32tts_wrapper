@@ -1,4 +1,5 @@
 obj
+output
 .sconsign.dblite
 *.dll
 *.exe
