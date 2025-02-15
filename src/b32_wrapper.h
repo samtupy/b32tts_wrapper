@@ -1,0 +1,14 @@
+#ifndef b32w_export
+#ifdef __cplusplus
+#define b32w_export extern "C" __declspec(dllexport)
+#else
+#define b32w_export extern __declspec(dllexport)
+#endif
+#endif
+
+struct bst_state;
+
+b32w_export const char** bst_voices(int* count = nullptr);
+b32w_export bst_state* bst_init(const char* module_path = "b32_tts.dll");
+b32w_export void bst_free(bst_state* s);
+b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voice = 0, int rate = 0, int gain = 0, bool pcm_header = true); // Make sure to pass return value of this function to crt free() when done with it.

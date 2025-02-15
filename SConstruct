@@ -1,0 +1,6 @@
+env = Environment(TARGET_ARCH = "x86")
+VariantDir("obj", "src", duplicate = 0)
+env.SharedLibrary("bin/b32_wrapper", "obj/b32_wrapper.cpp", LIBS = ["user32", "winmm", "bin/MinHook"])
+env.Program("bin/test", "obj/test.cpp", LIBS = ["user32", "winmm", "bin/b32_wrapper"])
+b32_wrapper_static = env.Object("obj/b32_wrapper_static", "obj/b32_wrapper.cpp", CPPDEFINES = [("b32w_export", "")])
+env.Program("bin/bspk", ["obj/argparse.c", b32_wrapper_static, "obj/bspk.cpp"], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])

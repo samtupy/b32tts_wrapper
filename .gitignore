@@ -1,0 +1,10 @@
+obj
+.sconsign.dblite
+*.dll
+*.exe
+*.exp
+*.lib
+*.obj
+*.wav
+!bin/b32_tts.dll
+!bin/MinHook.lib
