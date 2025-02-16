@@ -64,6 +64,9 @@ struct bst_state {
 	bstDestroyFunc bstDestroy;
 	bstSetParamsFunc bstSetParams;
 	bstGetParamsFunc bstGetParams;
+	bst_async_callback async_callback;
+	void* async_callback_user;
+	bool async_stop_speaking;
 	char* audio;
 	long audio_size;
 };
@@ -81,7 +84,7 @@ void WINAPI on_rel_buf(HWND hwnd, UINT msg, UINT_PTR timer_id, DWORD curtime) {
 MMRESULT WINAPI waveOutOpenHook(LPHWAVEOUT outptr, UINT device, LPCWAVEFORMATEX format, DWORD_PTR callback, DWORD_PTR instance, DWORD flags) {
 	if (!winmm_hooked_state) return waveOutOpenProc(outptr, device, format, callback, instance, flags);
 	*outptr = (HWAVEOUT)callback; // Now all other hooks will receive state information in their first parameter, though we prefer to use winmm_hooked_state. This also makes sure our hook returns what the calling function is expecting.
-	if (!winmm_hooked_state->audio) {
+	if (!winmm_hooked_state->audio && !winmm_hooked_state->async_callback) {
 		winmm_hooked_state->audio = (char*)malloc(winmm_hooked_state->audio_size);
 		make_wav_header_in_place((wav_header*)winmm_hooked_state->audio, 0, format->nSamplesPerSec, format->wBitsPerSample, format->nChannels, format->wFormatTag);
 	}
@@ -93,10 +96,18 @@ MMRESULT WINAPI waveOutPrepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT siz
 }
 MMRESULT WINAPI waveOutWriteHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
 	if (!winmm_hooked_state) return waveOutWriteProc(ptr, header, size);
-	winmm_hooked_state->audio = (char*)realloc(winmm_hooked_state->audio, winmm_hooked_state->audio_size + header->dwBufferLength);
-	memcpy(winmm_hooked_state->audio + winmm_hooked_state->audio_size, header->lpData, header->dwBufferLength);
-	winmm_hooked_state->audio_size += header->dwBufferLength;
 	SetTimer(nullptr, 0, USER_TIMER_MINIMUM, on_rel_buf);
+	if (winmm_hooked_state->async_stop_speaking) return MMSYSERR_NOERROR; // Callback returned false, drop all remaining buffers.
+	if (winmm_hooked_state->async_callback) {
+		if (!winmm_hooked_state->async_callback(header->lpData, header->dwBufferLength, winmm_hooked_state->async_callback_user)) {
+			winmm_hooked_state->async_stop_speaking = true;
+			return MMSYSERR_NOERROR;
+		}
+	} else {
+		winmm_hooked_state->audio = (char*)realloc(winmm_hooked_state->audio, winmm_hooked_state->audio_size + header->dwBufferLength);
+		memcpy(winmm_hooked_state->audio + winmm_hooked_state->audio_size, header->lpData, header->dwBufferLength);
+		winmm_hooked_state->audio_size += header->dwBufferLength;
+	}
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutUnprepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
@@ -139,7 +150,7 @@ b32w_export const char** bst_voices(int* count) {
 	if (count) *count = bst_voice_count;
 	return bst_voices_buf;
 }
-bst_state* bst_init_from_hmodule(HMODULE hmod) {
+inline bst_state* bst_init_from_hmodule(HMODULE hmod) {
 	if (!hmod) return nullptr;
 	voices_count();
 	bst_state* s = (bst_state*)malloc(sizeof(bst_state));
@@ -173,8 +184,7 @@ b32w_export void bst_free(bst_state* s) {
 	FreeLibrary(s->dll);
 	free(s);
 }
-b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voice, int rate, int gain, bool pcm_header) {
-	if (!s || !text) return nullptr;
+inline void bst_speak_internal(bst_state* s, const char* text, int voice, int rate, int gain) {
 	if (voice >= 0 && voice < bst_voice_count) { // prepend voice prefixes
 		int text_len = strlen(bst_voice_data[voice * 3 + 1]) + strlen(bst_voice_data[voice * 3 + 2]) + strlen(text) + 1;
 		char* actual_text = (char*)malloc(text_len);
@@ -183,7 +193,6 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	}
 	s->bstSetParams(s->tts, BST_RATE_SETTING, rate * -1); // Bestspeech interprets lower numbers as faster rates.
 	s->bstSetParams(s->tts, BST_GAIN_SETTING, gain);
-	s->audio_size = sizeof(wav_header);
 	winmm_hook();
 	winmm_hooked_state = s;
 	MH_EnableHook(MH_ALL_HOOKS);
@@ -191,6 +200,13 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	MH_DisableHook(MH_ALL_HOOKS);
 	winmm_hooked_state = nullptr;
 	if (voice >= 0 && voice < bst_voice_count) free((void*)text); // We've allocated a custom string in this case.
+}
+b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voice, int rate, int gain, bool pcm_header) {
+	if (!s || !text) return nullptr;
+	s->audio_size = sizeof(wav_header);
+	s->async_callback = nullptr;
+	s->async_stop_speaking = false;
+	bst_speak_internal(s, text, voice, rate, gain);
 	wav_header* h = (wav_header*)s->audio; // We must correct filesize here.
 	h->wav_size = s->audio_size - 8;
 	h->data_bytes = s->audio_size - sizeof(wav_header);
@@ -199,6 +215,14 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	char* data = s->audio;
 	s->audio = nullptr; // Will be allocated upon next speech segment.
 	return pcm_header? data : data + sizeof(wav_header);
+}
+b32w_export void bst_speak_async(bst_state* s, bst_async_callback callback, void* user, const char* text, int voice, int rate, int gain) {
+	if (!s || !text) return;
+	s->audio = nullptr;
+	s->async_callback = callback;
+	s->async_callback_user = user;
+	s->async_stop_speaking = false;
+	bst_speak_internal(s, text, voice, rate, gain);
 }
 b32w_export void bst_speech_free(char* data) {
 	free(data);

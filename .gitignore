@@ -6,6 +6,7 @@ output
 *.exp
 *.lib
 *.obj
+*.pcm
 *.wav
 !bin/b32_tts.dll
 !bin/MinHook.lib

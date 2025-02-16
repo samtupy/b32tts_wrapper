@@ -2,6 +2,14 @@
 #include <stdio.h>
 #include <windows.h>
 
+bool async_callback_stop(char* data, long size, void* user) {
+	fwrite(data, sizeof(char), size, (FILE*)user);
+	return false; // cancel synth
+}
+bool async_callback(char* data, long size, void* user) {
+	fwrite(data, sizeof(char), size, (FILE*)user);
+	return true; // keep going
+}
 int main() {
 	bst_state* s = bst_init_w(L"b32_tts.dll");
 	long size;
@@ -17,5 +25,9 @@ int main() {
 	fclose(f);
 	bst_speech_free(data);
 	PlaySound("test2.wav", nullptr, SND_SYNC);
+	f = fopen("test3.pcm", "wb");
+	bst_speak_async(s, async_callback_stop, f, "this is a test of synthesizing async");
+	bst_speak_async(s, async_callback, f, "this is a test of synthesizing async");
+	fclose(f);
 	bst_free(s);
 }
