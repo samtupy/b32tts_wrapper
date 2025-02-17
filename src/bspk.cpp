@@ -19,7 +19,7 @@ int main(int argc, const char** argv) {
 	};
 	argparse argparse;
 	argparse_init(&argparse, options, usages, 0);
-	argparse_describe(&argparse, "\nSpeak to a wav file with the bestspeak tts engine.", "");
+	argparse_describe(&argparse, "\nSpeak to a wav file with the bestspeech tts engine.", "");
 	argc = argparse_parse(&argparse, argc, argv);
 	int voice_count = 0, voice_idx = -1;
 	const char** voices = bst_voices(&voice_count);

@@ -63,6 +63,5 @@ Call this to free any data returned by bst_speak.
 
 ## Notes
 * This has not been tested in a multithreaded conntext. It's probably best to create a new bst_state for each thread.
-* We currently use the win32 SetTimer API to release buffers when we're done with them. This wrapper could probably be made more performant by replacing that logic with our own thread that frees buffers and posts a message to the GUI thread faster than SetTimer and it's associated USER_TIMER_MINIMUM limitation.
 * If you want to build the wrapper statically, make sure to define b32w_export to an empty value on the compiler command line so that the dllexport attribute won't be applied to the wrapper's functions, and make sure to link with bin/MinHook.lib in that case.
 * I did try to be careful here and make sure that the waveout hooks won't interfear with any other genuine usage of waveout in programs that use this wrapper. This is acomplished in 2 ways, first by leaving all API hooks disabled until right at the moment of synthesis then disabling them again the moment synthesis is complete, and also with a thread_local check that should passthrough any hooked waveout calls on threads other than the one invoking the tts engine.

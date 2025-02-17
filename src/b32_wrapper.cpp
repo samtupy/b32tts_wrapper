@@ -1,4 +1,4 @@
-// Wrapper around Bestspeak/keynote gold to support speaking to a memory buffer instead of waveout. Various constants/parameters/etc are taken from @rommix0's bst.h.
+// Wrapper around Bestspeech/keynote gold to support speaking to a memory buffer instead of waveout. Various constants/parameters/etc are taken from @rommix0's bst.h.
 // This is released into the public domain.
 
 #include <stdio.h> // _snprintf
@@ -35,7 +35,7 @@ const char* bst_voice_data[] = {
 int bst_voice_count = 0; // Will be initialized upon first call to bst_voices or bst_init.
 const char** bst_voices_buf = nullptr; // Contains pointers to voice names (populated in bst_voices call).
 
-// Function typedefs. First starting with the bestspeak definitions collected by Rommix, then moving on to the waveout definitions.
+// Function typedefs. First starting with the bestspeech definitions collected by Rommix, then moving on to the waveout definitions.
 typedef int  (__cdecl *bstCreateFunc)(long*&);
 typedef int  (__cdecl *TtsWavFunc)(long*, void*, const char*);
 typedef void (__cdecl *bstRelBufFunc)(long*);
@@ -53,7 +53,7 @@ typedef MMRESULT  (WINAPI *waveOutResetFunc)(HWAVEOUT);
 waveOutResetFunc waveOutResetProc;
 waveOutResetFunc waveOutCloseProc;
 
-// This structure contains all state information required to use bestspeak, including the dll module handle, required bst function pointers and the bestspeak handle itself.
+// This structure contains all state information required to use bestspeech, including the dll module handle, required bst function pointers and the bestspeak handle itself.
 struct bst_state {
 	HMODULE dll;
 	long* tts;
