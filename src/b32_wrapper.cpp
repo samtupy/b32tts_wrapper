@@ -70,15 +70,34 @@ struct bst_state {
 	char* audio;
 	long audio_size;
 	long audio_capacity;
+	HWND message_window;
 };
 
 bool winmm_hooked = false;
 thread_local bst_state* winmm_hooked_state = nullptr; // Insure that we can passthrough any hooked waveout calls that come through on a thread other than the one we are working on while providing global access to the speech state within hooks (SetTimer can't cary state information).
+HINSTANCE g_hinstance = nullptr;
 
-// If bstRelBuf is not called from a windows message loop the same number of times that waveOutWrite is called, TtsWav will never return!
-void WINAPI on_rel_buf(HWND hwnd, UINT msg, UINT_PTR timer_id, DWORD curtime) {
-	KillTimer(hwnd, timer_id);
-	winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
+// If bstRelBuf is not called from a windows message loop the same number of times that waveOutWrite is called, TtsWav will never return! We acomplish this with a hidden message window. We could theoretically just minhook PeekMessage or create a WH_GETMESSAGE hook with SetWindowsHookExA, but the way we're doing it is the most standard and correct, for whatever that's worth.
+#define WM_REL_BUF (WM_USER + 1)
+LRESULT CALLBACK on_rel_buf(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+	if (message == WM_REL_BUF) winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
+	else if (message == WM_DESTROY) PostQuitMessage(0);
+	else return DefWindowProc(hwnd, message, wParam, lParam);
+	return 0;
+}
+HWND create_message_window() {
+	WNDCLASSW wc = {};
+	if (!GetClassInfoW(g_hinstance, L"b32tts_wrapper_class", &wc)) {
+		wc.lpfnWndProc = on_rel_buf;
+		wc.hInstance	 = g_hinstance;
+		wc.lpszClassName = L"b32tts_wrapper_class";
+		if (!RegisterClassW(&wc)) return nullptr;
+	}
+	return CreateWindowExW(0, L"b32tts_wrapper_class", L"b32tts_wrapper_window", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hinstance, nullptr);
+}
+b32w_export BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
+	if (reason == DLL_PROCESS_ATTACH) g_hinstance = module;
+	return TRUE;
 }
 
 // Actual waveout hooks, most of these are no-ops/passthroughs accept for open and write. The no-ops must still exist to insure that no erroneous function calls reach the WinMM API.
@@ -97,7 +116,7 @@ MMRESULT WINAPI waveOutPrepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT siz
 }
 MMRESULT WINAPI waveOutWriteHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
 	if (!winmm_hooked_state) return waveOutWriteProc(ptr, header, size);
-	SetTimer(nullptr, 0, USER_TIMER_MINIMUM, on_rel_buf);
+	PostMessage(winmm_hooked_state->message_window, WM_REL_BUF, 0, 0);
 	if (winmm_hooked_state->async_stop_speaking) return MMSYSERR_NOERROR; // Callback returned false, drop all remaining buffers.
 	if (winmm_hooked_state->async_callback) {
 		if (!winmm_hooked_state->async_callback(header->lpData, header->dwBufferLength, winmm_hooked_state->async_callback_user)) {
@@ -167,6 +186,7 @@ inline bst_state* bst_init_from_hmodule(HMODULE hmod) {
 	s->bstSetParams = (bstSetParamsFunc)GetProcAddress(s->dll, "bstSetParams");
 	s->bstGetParams = (bstGetParamsFunc)GetProcAddress(s->dll, "bstGetParams");
 	s->audio = nullptr;
+	s->message_window = nullptr; // We'll create this in the speak function encase the user calls speak on another thread from init.
 	if (!s->bstCreate || !s->TtsWav || s->bstCreate(s->tts)) {
 		FreeLibrary(s->dll);
 		free(s);
@@ -186,9 +206,11 @@ b32w_export void bst_free(bst_state* s) {
 	s->bstClose(s->tts);
 	s->bstDestroy();
 	FreeLibrary(s->dll);
+	DestroyWindow(s->message_window);
 	free(s);
 }
 inline void bst_speak_internal(bst_state* s, const char* text, int voice, int rate, int gain) {
+	if (!s->message_window) s->message_window = create_message_window();
 	if (voice >= 0 && voice < bst_voice_count) { // prepend voice prefixes
 		int text_len = strlen(bst_voice_data[voice * 3 + 1]) + strlen(bst_voice_data[voice * 3 + 2]) + strlen(text) + 1;
 		char* actual_text = (char*)malloc(text_len);

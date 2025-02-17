@@ -7,6 +7,7 @@ output
 *.lib
 *.obj
 *.pcm
+*.pdb
 *.wav
 !bin/b32_tts.dll
 !bin/MinHook.lib
