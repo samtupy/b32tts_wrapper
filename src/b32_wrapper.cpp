@@ -102,7 +102,7 @@ b32w_export BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
 
 // Actual waveout hooks, most of these are no-ops/passthroughs accept for open and write. The no-ops must still exist to insure that no erroneous function calls reach the WinMM API.
 MMRESULT WINAPI waveOutOpenHook(LPHWAVEOUT outptr, UINT device, LPCWAVEFORMATEX format, DWORD_PTR callback, DWORD_PTR instance, DWORD flags) {
-	if (!winmm_hooked_state) return waveOutOpenProc(outptr, device, format, callback, instance, flags);
+	if (!winmm_hooked_state || (bst_state*)callback != winmm_hooked_state) return waveOutOpenProc(outptr, device, format, callback, instance, flags);
 	*outptr = (HWAVEOUT)callback; // Now all other hooks will receive state information in their first parameter, though we prefer to use winmm_hooked_state. This also makes sure our hook returns what the calling function is expecting.
 	if (!winmm_hooked_state->audio && !winmm_hooked_state->async_callback) {
 		winmm_hooked_state->audio = (char*)malloc(winmm_hooked_state->audio_capacity);
@@ -111,11 +111,11 @@ MMRESULT WINAPI waveOutOpenHook(LPHWAVEOUT outptr, UINT device, LPCWAVEFORMATEX 
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutPrepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
-	if (!winmm_hooked_state) return waveOutPrepareHeaderProc(ptr, header, size);
+	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutPrepareHeaderProc(ptr, header, size);
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutWriteHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
-	if (!winmm_hooked_state) return waveOutWriteProc(ptr, header, size);
+	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutWriteProc(ptr, header, size);
 	PostMessage(winmm_hooked_state->message_window, WM_REL_BUF, 0, 0);
 	if (winmm_hooked_state->async_stop_speaking) return MMSYSERR_NOERROR; // Callback returned false, drop all remaining buffers.
 	if (winmm_hooked_state->async_callback) {
@@ -134,27 +134,27 @@ MMRESULT WINAPI waveOutWriteHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutUnprepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
-	if (!winmm_hooked_state) return waveOutUnprepareHeaderProc(ptr, header, size);
+	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutUnprepareHeaderProc(ptr, header, size);
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutResetHook(HWAVEOUT ptr) {
-	if (!winmm_hooked_state) return waveOutResetProc(ptr);
+	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutResetProc(ptr);
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutCloseHook(HWAVEOUT ptr) {
-	if (!winmm_hooked_state) return waveOutCloseProc(ptr);
+	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutCloseProc(ptr);
 	return MMSYSERR_NOERROR;
 }
 
 void winmm_hook() {
 	if (winmm_hooked) return;
 	MH_Initialize();
-	MH_CreateHook(waveOutOpen, waveOutOpenHook, (LPVOID*)&waveOutOpenProc);
-	MH_CreateHook(waveOutPrepareHeader, waveOutPrepareHeaderHook, (LPVOID*)&waveOutPrepareHeaderProc);
-	MH_CreateHook(waveOutWrite, waveOutWriteHook, (LPVOID*)&waveOutWriteProc);
-	MH_CreateHook(waveOutUnprepareHeader, waveOutUnprepareHeaderHook, (LPVOID*)&waveOutUnprepareHeaderProc);
-	MH_CreateHook(waveOutReset, waveOutResetHook, (LPVOID*)&waveOutResetProc);
-	MH_CreateHook(waveOutClose, waveOutCloseHook, (LPVOID*)&waveOutCloseProc);
+	MH_CreateHook((LPVOID)waveOutOpen, (LPVOID)waveOutOpenHook, (LPVOID*)&waveOutOpenProc);
+	MH_CreateHook((LPVOID)waveOutPrepareHeader, (LPVOID)waveOutPrepareHeaderHook, (LPVOID*)&waveOutPrepareHeaderProc);
+	MH_CreateHook((LPVOID)waveOutWrite, (LPVOID)waveOutWriteHook, (LPVOID*)&waveOutWriteProc);
+	MH_CreateHook((LPVOID)waveOutUnprepareHeader, (LPVOID)waveOutUnprepareHeaderHook, (LPVOID*)&waveOutUnprepareHeaderProc);
+	MH_CreateHook((LPVOID)waveOutReset, (LPVOID)waveOutResetHook, (LPVOID*)&waveOutResetProc);
+	MH_CreateHook((LPVOID)waveOutClose, (LPVOID)waveOutCloseHook, (LPVOID*)&waveOutCloseProc);
 	winmm_hooked = TRUE;
 }
 
