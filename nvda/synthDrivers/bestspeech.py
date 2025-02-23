@@ -1,11 +1,15 @@
 import os
 from synthDriverHandler import SynthDriver, synthIndexReached, synthDoneSpeaking
+from speech.commands import IndexCommand, PitchCommand, CharacterModeCommand
 import ctypes
 from ctypes import c_char_p, c_void_p, c_long, c_wchar_p, byref, POINTER, CFUNCTYPE
 import nvwave
 import config
 import winUser
 from speech.commands import IndexCommand
+from autoSettingsUtils.driverSetting import DriverSetting, BooleanDriverSetting
+from autoSettingsUtils.utils import StringParameterInfo
+import re
 import time
 import queue
 import threading
@@ -13,6 +17,12 @@ from logHandler import log
 
 minRate = 200
 maxRate = -90
+minPitch = 43
+maxPitch = 230
+minInflection = -150
+maxInflection = 150
+minVolume = -68
+maxVolume = 12
 
 GAIN_SETTING = 258
 
@@ -49,8 +59,9 @@ def _execWhenDone(func, *args, mustBeAsync=False, **kwargs):
 class SynthDriver(SynthDriver):
 	name = 'bestspeech'
 	description = 'Bestspeech'
-	supportedSettings = (SynthDriver.RateSetting(), SynthDriver.PitchSetting(), SynthDriver.InflectionSetting())
+	supportedSettings = (SynthDriver.RateSetting(), SynthDriver.PitchSetting(), SynthDriver.InflectionSetting(), SynthDriver.VolumeSetting(), DriverSetting("headsize", "&Headsize", defaultVal="1", availableInSettingsRing=True), DriverSetting("excitation", "&Excitation", defaultVal="0", availableInSettingsRing=True), BooleanDriverSetting("numberProcessing", "&Number Processing", defaultVal=False), BooleanDriverSetting("abbreviations", "&Abbreviations", defaultVal=True), BooleanDriverSetting("phrasePrediction", "&Phrase Prediction", defaultVal=True))
 	supportedNotifications = {synthIndexReached, synthDoneSpeaking}
+	supportedCommands = {PitchCommand, CharacterModeCommand, IndexCommand}
 
 	@classmethod
 	def check(cls):
@@ -79,25 +90,112 @@ class SynthDriver(SynthDriver):
 		self.bgThread = BgThread()
 		self.bgThread.start()
 		self.rate = 90
+		self.pitch = self._paramToPercent(80, minPitch, maxPitch)
+		self.inflection = self._paramToPercent(0, minInflection, maxInflection)
+		self.volume = self._paramToPercent(0, minVolume, maxVolume)
+		self.headsize = "1"
+		self.excitation = "0"
+		self.numberProcessing = False
+		self.abbreviations = True
+		self._phrasePrediction = True
 		self.table = str.maketrans("’", "'")
 		self.canceled = False
 
 	def _set_rate(self, vl):
-		self.dt_rate = self._percentToParam(vl,minRate,maxRate)
+		self._rate = self._percentToParam(vl,minRate,maxRate)
 
 	def _get_rate(self):
-		return self._paramToPercent(self.dt_rate, minRate, maxRate)
+		return self._paramToPercent(self._rate, minRate, maxRate)
+
+	def _set_pitch(self, vl):
+		self._pitch = self._percentToParam(vl,minPitch,maxPitch)
+
+	def _get_pitch(self):
+		return self._paramToPercent(self._pitch, minPitch, maxPitch)
+
+	def _set_volume(self, vl):
+		self._volume = self._percentToParam(vl,minVolume,maxVolume)
+
+	def _get_volume(self):
+		return self._paramToPercent(self._volume, minVolume, maxVolume)
+
+	def _set_inflection(self, vl):
+		self._inflection = self._percentToParam(vl,minInflection,maxInflection)
+
+	def _get_inflection(self):
+		return self._paramToPercent(self._inflection, minInflection, maxInflection)
+
+	def _set_headsize(self, vl):
+		n = int(vl)
+		self._headsize = vl if n > -1 and n < 7 else 1
+
+	def _get_headsize(self):
+		return self._headsize
+
+	def _get_availableHeadsizes(self):
+		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(1, 7)}
+
+	def _set_excitation(self, vl):
+		n = int(vl)
+		self._excitation = vl if n > -1 and n < 7 else 1
+
+	def _get_excitation(self):
+		return self._excitation
+
+	def _get_availableExcitations(self):
+		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(7)}
+
+	def _set_numberProcessing(self, val):
+		self._numberProcessing = bool(val)
+
+	def _get_numberProcessing(self):
+		return self._numberProcessing
+
+	def _set_abbreviations(self, val):
+		self._abbreviations = bool(val)
+
+	def _get_abbreviations(self):
+		return self._abbreviations
+
+	def _set_phrasePrediction(self, val):
+		self._phrasePrediction = bool(val)
+
+	def _get_phrasePrediction(self):
+		return self._phrasePrediction
+
+	def _formatNumbers(self, text):
+		def replace_num(m):
+			num_str = m.group(0)
+			return format(int(num_str), ",")
+		return re.sub(r"\b\d{5,}\b", replace_num, text)
 
 	def speak(self, speechSequence):
-		lst = []
+		lst = ["~n10,0]" if self._abbreviations else "~n10,1]", "~~1,0]" if self._phrasePrediction else "~~1,1]"]
+		
 		idx = []
+		char_mode_on = pitch_modified = False
 		for item in speechSequence:
 			if isinstance(item, str):
 				lst.append(item)
+				if char_mode_on:
+					lst.append("~n1,0]")
+					char_mode_on = False
+				if pitch_modified:
+					lst.append(f"~f{self._pitch}]")
+					pitch_modified = False
 			elif isinstance(item, IndexCommand):
 				idx.append(item.index)
+			elif isinstance(item,CharacterModeCommand):
+				char_mode_on = bool(item.state)
+				lst.append("~n1,1]" if char_mode_on else "~n1,0]")
+			elif isinstance(item,PitchCommand):
+				try: multiplier = item.multiplier
+				except ZeroDevisionError: multiplier = 1
+				f = int(self._pitch * multiplier)
+				lst.append(f"~f{f}]")
 		text = " ".join(lst)
-		text = f"~r{self.dt_rate}]{text} ~|"
+		if self._numberProcessing: text = self._formatNumbers(text)
+		text = f"~r{self._rate}]~e{self._excitation}]~v{self.headsize}]~f{self._pitch}]~g{self._volume}]~h{self._inflection}]{text} ~|"
 		_execWhenDone(self._speakBg, text, idx, mustBeAsync=True)
 
 	def _speakBg(self, text, idx):
