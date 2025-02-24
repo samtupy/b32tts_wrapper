@@ -53,12 +53,12 @@ int main(int argc, const char** argv) {
 		FILE* f = fopen(outpath, "wb");
 		if(!f) {
 			printf("error opening output file\n");
-			free(buf);
+			bst_speech_free(buf);
 			return 1;
 		}
 		fwrite(buf, sizeof(char), bufsize, f);
 		fclose(f);
 	}
-	free(buf);
+	bst_speech_free(buf);
 	return 0;
 }

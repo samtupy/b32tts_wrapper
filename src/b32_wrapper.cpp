@@ -74,7 +74,7 @@ struct bst_state {
 };
 
 bool winmm_hooked = false;
-thread_local bst_state* winmm_hooked_state = nullptr; // Insure that we can passthrough any hooked waveout calls that come through on a thread other than the one we are working on while providing global access to the speech state within hooks (SetTimer can't cary state information).
+thread_local bst_state* winmm_hooked_state = nullptr; // Insure that we can passthrough any hooked waveout calls that come through on a thread or context other than the one we are working on while providing global access to the speech state within hooks.
 HINSTANCE g_hinstance = nullptr;
 
 // If bstRelBuf is not called from a windows message loop the same number of times that waveOutWrite is called, TtsWav will never return! We acomplish this with a hidden message window. We could theoretically just minhook PeekMessage or create a WH_GETMESSAGE hook with SetWindowsHookExA, but the way we're doing it is the most standard and correct, for whatever that's worth.
@@ -100,10 +100,10 @@ b32w_export BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
 	return TRUE;
 }
 
-// Actual waveout hooks, most of these are no-ops/passthroughs accept for open and write. The no-ops must still exist to insure that no erroneous function calls reach the WinMM API.
+// Actual waveout hooks, most of these are no-ops/passthroughs accept for open and write. The no-ops must still exist to insure that no unwanted function calls from bestspeech reach the WinMM API.
 MMRESULT WINAPI waveOutOpenHook(LPHWAVEOUT outptr, UINT device, LPCWAVEFORMATEX format, DWORD_PTR callback, DWORD_PTR instance, DWORD flags) {
 	if (!winmm_hooked_state || (bst_state*)callback != winmm_hooked_state) return waveOutOpenProc(outptr, device, format, callback, instance, flags);
-	*outptr = (HWAVEOUT)callback; // Now all other hooks will receive state information in their first parameter, though we prefer to use winmm_hooked_state. This also makes sure our hook returns what the calling function is expecting.
+	*outptr = (HWAVEOUT)callback; // Now all other hooks will receive state information in their first parameter, though we prefer to use winmm_hooked_state. This also makes sure our hook returns a semblance of what the calling function is expecting.
 	if (!winmm_hooked_state->audio && !winmm_hooked_state->async_callback) {
 		winmm_hooked_state->audio = (char*)malloc(winmm_hooked_state->audio_capacity);
 		if (winmm_hooked_state->audio_size) make_wav_header_in_place((wav_header*)winmm_hooked_state->audio, 0, format->nSamplesPerSec, format->wBitsPerSample, format->nChannels, format->wFormatTag);
