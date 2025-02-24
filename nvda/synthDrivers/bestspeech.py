@@ -1,13 +1,12 @@
 import os
-from synthDriverHandler import SynthDriver, synthIndexReached, synthDoneSpeaking
+from synthDriverHandler import SynthDriver, synthIndexReached, synthDoneSpeaking, VoiceInfo
 from speech.commands import IndexCommand, PitchCommand, CharacterModeCommand
 import ctypes
 from ctypes import c_char_p, c_void_p, c_long, c_wchar_p, byref, POINTER, CFUNCTYPE
 import nvwave
 import config
 import winUser
-from speech.commands import IndexCommand
-from autoSettingsUtils.driverSetting import DriverSetting, BooleanDriverSetting
+from autoSettingsUtils.driverSetting import DriverSetting, BooleanDriverSetting, NumericDriverSetting
 from autoSettingsUtils.utils import StringParameterInfo
 import re
 import time
@@ -18,13 +17,29 @@ from logHandler import log
 minRate = 200
 maxRate = -90
 minPitch = 43
-maxPitch = 230
+maxPitch = 413 # carefully chozen so that the range is within all custom voices while the default value of default voice is pitch 10 in the settings ring.
 minInflection = -150
 maxInflection = 150
 minVolume = -68
 maxVolume = 12
 
-GAIN_SETTING = 258
+# Thanks Rommix for the custom voices.
+voices = {
+	"fred": {"headsize": "1", "excitation": "3", "inflection": 0, "unvoicedVolume": 0, "pitch": 80},
+	"sara": {"headsize": "2", "excitation": "3", "inflection": -20, "unvoicedVolume": 0, "pitch": 175},
+	"hary": {"headsize": "3", "excitation": "3", "inflection": 10, "unvoicedVolume": 0, "pitch": 65},
+	"wendy": {"headsize": "2", "excitation": "1", "inflection": 50, "unvoicedVolume": 0, "pitch": 150},
+	"dexter": {"headsize": "6", "excitation": "6", "inflection": 0, "unvoicedVolume": -25, "pitch": 90},
+	"alien": {"headsize": "4", "excitation": "6", "inflection": -50, "unvoicedVolume": -20, "pitch": 115},
+	"kit": {"headsize": "5", "excitation": "3", "inflection": 40, "unvoicedVolume": 0, "pitch": 230},
+	"bruno": {"headsize": "3", "excitation": "3", "inflection": 50, "unvoicedVolume": 0, "pitch": 60},
+	"ghost": {"headsize": "3", "excitation": "2", "inflection": 50, "unvoicedVolume": 0, "pitch": 60},
+	"peeper": {"headsize": "2", "excitation": "2", "inflection": 0, "unvoicedVolume": 5, "pitch": 80},
+	"dracula": {"headsize": "3", "excitation": "3", "inflection": 45, "unvoicedVolume": -5, "pitch": 47},
+	"granny": {"headsize": "4", "excitation": "3", "inflection": -60, "unvoicedVolume": 0, "pitch": 350},
+	"martha": {"headsize": "6", "excitation": "4", "inflection": 100, "unvoicedVolume": -5, "pitch": 300},
+	"tim": {"headsize": "3", "excitation": "4", "inflection": -10, "unvoicedVolume": 0, "pitch": 60}
+}
 
 bst_async_callback = CFUNCTYPE(c_long, c_void_p, c_long, c_void_p)
 
@@ -35,7 +50,6 @@ class BgThread(threading.Thread):
 		self.daemon = True
 
 	def run(self):
-		global isSpeaking
 		while True:
 			func, args, kwargs = bgQueue.get()
 			if not func:
@@ -59,7 +73,19 @@ def _execWhenDone(func, *args, mustBeAsync=False, **kwargs):
 class SynthDriver(SynthDriver):
 	name = 'bestspeech'
 	description = 'Bestspeech'
-	supportedSettings = (SynthDriver.RateSetting(), SynthDriver.PitchSetting(), SynthDriver.InflectionSetting(), SynthDriver.VolumeSetting(), DriverSetting("headsize", "&Headsize", defaultVal="1", availableInSettingsRing=True), DriverSetting("excitation", "&Excitation", defaultVal="0", availableInSettingsRing=True), BooleanDriverSetting("numberProcessing", "&Number Processing", defaultVal=False), BooleanDriverSetting("abbreviations", "&Abbreviations", defaultVal=True), BooleanDriverSetting("phrasePrediction", "&Phrase Prediction", defaultVal=True))
+	supportedSettings = (
+		SynthDriver.VoiceSetting(),
+		SynthDriver.RateSetting(),
+		SynthDriver.PitchSetting(),
+		SynthDriver.InflectionSetting(),
+		SynthDriver.VolumeSetting(),
+		NumericDriverSetting("unvoicedVolume", "&Unvoiced Volume", defaultVal=0, availableInSettingsRing=True),
+		DriverSetting("headsize", "&Headsize", defaultVal="1", availableInSettingsRing=True),
+		DriverSetting("excitation", "&Excitation", defaultVal="0", availableInSettingsRing=True),
+		BooleanDriverSetting("numberProcessing", "&Number Processing", defaultVal=False),
+		BooleanDriverSetting("abbreviations", "&Abbreviations", defaultVal=True),
+		BooleanDriverSetting("phrasePrediction", "&Phrase Prediction", defaultVal=True)
+	)
 	supportedNotifications = {synthIndexReached, synthDoneSpeaking}
 	supportedCommands = {PitchCommand, CharacterModeCommand, IndexCommand}
 
@@ -81,20 +107,15 @@ class SynthDriver(SynthDriver):
 		self.dll.bst_init_w.argtypes = (ctypes.c_wchar_p,)
 		self.dll.bst_init_w.restype = c_void_p
 		self.dll.bst_free.argtypes = (c_void_p,)
-		self.dll.bst_speak.argtypes = (c_void_p, POINTER(c_long), c_char_p, c_long, c_long, c_long)
-		self.dll.bst_speak.restype = c_void_p
-		self.dll.bst_speech_free.argtypes = (c_void_p,)
+		self.dll.bst_speak_async.restype = c_void_p
 		self.handle = self.dll.bst_init_w(path)
 		global bgQueue
 		bgQueue = queue.Queue()
 		self.bgThread = BgThread()
 		self.bgThread.start()
 		self.rate = 90
-		self.pitch = self._paramToPercent(80, minPitch, maxPitch)
-		self.inflection = self._paramToPercent(0, minInflection, maxInflection)
 		self.volume = self._paramToPercent(0, minVolume, maxVolume)
-		self.headsize = "1"
-		self.excitation = "0"
+		self.voice = "fred" # This will automatically set all other parameters like pitch, inflection, excitation and more.
 		self.numberProcessing = False
 		self.abbreviations = True
 		self._phrasePrediction = True
@@ -118,6 +139,12 @@ class SynthDriver(SynthDriver):
 
 	def _get_volume(self):
 		return self._paramToPercent(self._volume, minVolume, maxVolume)
+
+	def _set_unvoicedVolume(self, vl):
+		self._unvoicedVolume = self._percentToParam(vl,minVolume,maxVolume)
+
+	def _get_unvoicedVolume(self):
+		return self._paramToPercent(self._unvoicedVolume, minVolume, maxVolume)
 
 	def _set_inflection(self, vl):
 		self._inflection = self._percentToParam(vl,minInflection,maxInflection)
@@ -163,6 +190,25 @@ class SynthDriver(SynthDriver):
 	def _get_phrasePrediction(self):
 		return self._phrasePrediction
 
+	def _set_voice(self, vl):
+		if not vl in voices: return
+		self._voice = vl
+		# set voice parameters
+		for p in voices[vl]:
+			if not hasattr(self, p): continue
+			try:
+				minimum = globals()[f"min{p.title()}"] if not "Volume" in p else globals()["minVolume"]
+				maximum = globals()[f"max{p.title()}"] if not "Volume" in p else globals()["maxVolume"]
+				setattr(self, p, self._paramToPercent(voices[vl][p], minimum, maximum))
+			except KeyError:
+				setattr(self, p, voices[vl][p])
+
+	def _get_voice(self):
+		return self._voice
+
+	def _getAvailableVoices(self):
+		return {v: VoiceInfo(v, v) for v in voices}
+
 	def _formatNumbers(self, text):
 		def replace_num(m):
 			num_str = m.group(0)
@@ -171,7 +217,6 @@ class SynthDriver(SynthDriver):
 
 	def speak(self, speechSequence):
 		lst = ["~n10,0]" if self._abbreviations else "~n10,1]", "~~1,0]" if self._phrasePrediction else "~~1,1]"]
-		
 		idx = []
 		char_mode_on = pitch_modified = False
 		for item in speechSequence:
@@ -195,7 +240,7 @@ class SynthDriver(SynthDriver):
 				lst.append(f"~f{f}]")
 		text = " ".join(lst)
 		if self._numberProcessing: text = self._formatNumbers(text)
-		text = f"~r{self._rate}]~e{self._excitation}]~v{self.headsize}]~f{self._pitch}]~g{self._volume}]~h{self._inflection}]{text} ~|"
+		text = f"~r{self._rate}]~e{self._excitation}]~v{self.headsize}]~f{self._pitch}]~g{self._volume}]~u{self._unvoicedVolume}]~h{self._inflection}]{text} ~|"
 		_execWhenDone(self._speakBg, text, idx, mustBeAsync=True)
 
 	def _speakBg(self, text, idx):
