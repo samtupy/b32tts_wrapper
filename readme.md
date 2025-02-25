@@ -15,15 +15,15 @@ This project uses the SCons build system. If you have scons installed, you can j
 ## How to use?
 
 ### Command line utility
-If you just want to speak text out loud or to a file, you are likely going to be much more interested in the high level command line utility created from this wrapper instead of the wrapper's API itself. After downloading a binary release or building the project from source, you will see the file bin/bspk.exe. You can run bspk -h for the most up-to-date help on the program.
+If you just want to speak text out loud or to a file, you are likely going to be much more interested in the high level command line utility created from this wrapper instead of the wrapper's API itself. After downloading a binary release or building the project from source, you will see the file bin/b32_spk.exe. You can run b32_spk -h for the most up-to-date help on the program.
 
 In short, the accepted switches are -v to select a voice, -t to set text to speak, -f to set an output filename and -r to set the speech rate.
 
 For example,
 
-```bspk -ftts.wav -vHary -t"Hi there, my name is Hary!"```
+```b32_spk -ftts.wav -vHary -t"Hi there, my name is Hary!"```
 
-You can set the voice to a single questionmark (?) to list available voices. For example, ```bspk -v?```
+You can set the voice to a single questionmark (?) to list available voices. For example, ```b32_spk -v?```
 
 ## NVDA addon
 

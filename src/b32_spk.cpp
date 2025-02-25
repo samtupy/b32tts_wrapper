@@ -8,7 +8,7 @@
 int main(int argc, const char** argv) {
 	const char *voice = nullptr, *text = nullptr, *outpath = nullptr;
 	int rate = 0;
-	const char* const usages[] = {"bspk [options]", nullptr};
+	const char* const usages[] = {"b32_spk [options]", nullptr};
 	argparse_option options[] = {
 		OPT_HELP(),
 		OPT_STRING('f', "filename", &outpath, "output wav filename", nullptr, 0, 0),
@@ -37,7 +37,7 @@ int main(int argc, const char** argv) {
 		}
 	}
 	if (!text || !text[0]) {
-		printf("No text provided, run bspk -h for help\n");
+		printf("No text provided, run b32_spk -h for help\n");
 		return 1;
 	}
 	bst_state* tts = bst_init();

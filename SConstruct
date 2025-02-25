@@ -4,4 +4,4 @@ env.SharedLibrary("bin/b32_wrapper", "obj/b32_wrapper.cpp", LIBS = ["user32", "w
 env.Program("bin/test", "obj/test.cpp", LIBS = ["user32", "winmm", "bin/b32_wrapper"])
 env.Program("bin/test_rapid", "obj/test_rapid.cpp", LIBS = ["user32", "winmm", "bin/b32_wrapper"])
 b32_wrapper_static = env.Object("obj/b32_wrapper_static", "obj/b32_wrapper.cpp", CPPDEFINES = [("b32w_export", "")])
-env.Program("bin/bspk", ["obj/argparse.c", b32_wrapper_static, "obj/bspk.cpp"], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
+env.Program("bin/b32_spk", ["obj/argparse.c", b32_wrapper_static, "obj/b32_spk.cpp"], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
