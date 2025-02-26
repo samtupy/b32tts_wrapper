@@ -164,13 +164,13 @@ class SynthDriver(SynthDriver):
 
 	def _set_excitation(self, vl):
 		n = int(vl)
-		self._excitation = vl if n > -1 and n < 7 else 1
+		self._excitation = vl if n > -1 and n < 8 else 1
 
 	def _get_excitation(self):
 		return self._excitation
 
 	def _get_availableExcitations(self):
-		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(7)}
+		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(8)}
 
 	def _set_numberProcessing(self, val):
 		self._numberProcessing = bool(val)
