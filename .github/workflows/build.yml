@@ -1,0 +1,44 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+jobs:
+  windows_build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: build
+      run: |
+        pip3 install scons
+        scons -s
+        cp bin/*.dll nvda/synthDrivers
+        mkdir b32_assets
+        cd bin
+        7z a -tzip ../b32_assets/b32_bin.zip *.dll b32_spk.exe
+        cd ..
+        cd nvda
+        7z a -tzip ../b32_assets/bestspeech.nvda-addon *
+        cd ..
+    - uses: actions/upload-artifact@v4
+      with:
+        name: b32_assets
+        path: 'b32_assets'
+  publish_release:
+    needs: ["windows_build"]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+    - uses: ghalactic/github-release-from-tag@v5
+      with:
+        checksumGenerateAssets: "false"
+        assets: |
+          - path: b32_assets/b32_bin.zip
+            name: b32_bin_${{github.ref_name}}.zip
+          - path: b32_assets/bestspeech.nvda-addon
+            name: bestspeech_${{github.ref_name}}.nvda-addon
