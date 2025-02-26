@@ -250,6 +250,9 @@ class SynthDriver(SynthDriver):
 			self.player.feed(data, size)
 			return True
 		self.speaking = True
+		# As a dirty hack to make indent nav beeps mostly work, indicate that we've reached the first index immedietly.
+		if idx and len(idx) > 1:
+			synthIndexReached.notify(synth=self, index=idx.pop(0))
 		txt = text.translate(self.table).encode('windows-1252', 'replace')
 		self.dll.bst_speak_async(self.handle, on_audio, None, txt, -1, 0, 0)
 		if not self.speaking: return
