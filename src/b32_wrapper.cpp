@@ -97,6 +97,10 @@ HWND create_message_window() {
 }
 b32w_export BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
 	if (reason == DLL_PROCESS_ATTACH) g_hinstance = module;
+	else if (reason == DLL_PROCESS_DETACH && winmm_hooked) {
+		MH_DisableHook(MH_ALL_HOOKS);
+		MH_Uninitialize();
+	}
 	return TRUE;
 }
 
@@ -155,6 +159,7 @@ void winmm_hook() {
 	MH_CreateHook((LPVOID)waveOutUnprepareHeader, (LPVOID)waveOutUnprepareHeaderHook, (LPVOID*)&waveOutUnprepareHeaderProc);
 	MH_CreateHook((LPVOID)waveOutReset, (LPVOID)waveOutResetHook, (LPVOID*)&waveOutResetProc);
 	MH_CreateHook((LPVOID)waveOutClose, (LPVOID)waveOutCloseHook, (LPVOID*)&waveOutCloseProc);
+	MH_EnableHook(MH_ALL_HOOKS);
 	winmm_hooked = TRUE;
 }
 
@@ -221,9 +226,7 @@ inline void bst_speak_internal(bst_state* s, const char* text, int voice, int ra
 	s->bstSetParams(s->tts, BST_GAIN_SETTING, gain);
 	winmm_hook();
 	winmm_hooked_state = s;
-	MH_EnableHook(MH_ALL_HOOKS);
 	s->TtsWav(s->tts, s, text);
-	MH_DisableHook(MH_ALL_HOOKS);
 	winmm_hooked_state = nullptr;
 	if (voice >= 0 && voice < bst_voice_count) free((void*)text); // We've allocated a custom string in this case.
 }
