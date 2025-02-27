@@ -122,6 +122,11 @@ class SynthDriver(SynthDriver):
 		self.table = str.maketrans("’", "'")
 		self.canceled = False
 
+	def loadSettings(self, onlyChanged = False):
+		# We can probably remove this in a bit, we override this to make sure people's excitation setting doesn't break across addon versions.
+		super().loadSettings(onlyChanged)
+		if self.excitation == "0": self.excitation = "3"
+
 	def _set_rate(self, vl):
 		self._rate = self._percentToParam(vl,minRate,maxRate)
 
