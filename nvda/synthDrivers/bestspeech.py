@@ -81,7 +81,7 @@ class SynthDriver(SynthDriver):
 		SynthDriver.VolumeSetting(),
 		NumericDriverSetting("unvoicedVolume", "&Unvoiced Volume", defaultVal=0, availableInSettingsRing=True),
 		DriverSetting("headsize", "&Headsize", defaultVal="1", availableInSettingsRing=True),
-		DriverSetting("excitation", "&Excitation", defaultVal="0", availableInSettingsRing=True),
+		DriverSetting("excitation", "&Excitation", defaultVal="3", availableInSettingsRing=True),
 		BooleanDriverSetting("numberProcessing", "&Number Processing", defaultVal=False),
 		BooleanDriverSetting("abbreviations", "&Abbreviations", defaultVal=True),
 		BooleanDriverSetting("phrasePrediction", "&Phrase Prediction", defaultVal=True)
@@ -170,7 +170,7 @@ class SynthDriver(SynthDriver):
 		return self._excitation
 
 	def _get_availableExcitations(self):
-		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(8)}
+		return { str(i): StringParameterInfo(str(i), str(i)) for i in range(1,8)}
 
 	def _set_numberProcessing(self, val):
 		self._numberProcessing = bool(val)
