@@ -19,7 +19,7 @@ int main() {
 	fclose(f);
 	bst_speech_free(data);
 	PlaySound("test.wav", nullptr, SND_SYNC);
-	data = bst_speak(s, &size, "this is a second test using the same instance");
+	data = bst_speak(s, &size, "this is a second test using the same instance but with a rate boost applied", 0, -200, 6);
 	f = fopen("test2.wav", "wb");
 	fwrite(data, sizeof(char), size, f);
 	fclose(f);

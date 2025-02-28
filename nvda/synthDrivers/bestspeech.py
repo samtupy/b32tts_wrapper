@@ -2,7 +2,7 @@ import os
 from synthDriverHandler import SynthDriver, synthIndexReached, synthDoneSpeaking, VoiceInfo
 from speech.commands import IndexCommand, PitchCommand, CharacterModeCommand
 import ctypes
-from ctypes import c_char_p, c_void_p, c_long, c_wchar_p, byref, POINTER, CFUNCTYPE
+from ctypes import c_char_p, c_void_p, c_long, c_float, c_wchar_p, byref, POINTER, CFUNCTYPE
 import nvwave
 import config
 import winUser
@@ -76,6 +76,7 @@ class SynthDriver(SynthDriver):
 	supportedSettings = (
 		SynthDriver.VoiceSetting(),
 		SynthDriver.RateSetting(),
+		SynthDriver.RateBoostSetting(),
 		SynthDriver.PitchSetting(),
 		SynthDriver.InflectionSetting(),
 		SynthDriver.VolumeSetting(),
@@ -132,6 +133,12 @@ class SynthDriver(SynthDriver):
 
 	def _get_rate(self):
 		return self._paramToPercent(self._rate, minRate, maxRate)
+
+	def _set_rateBoost(self, enable):
+		self._rateBoost = enable
+
+	def _get_rateBoost(self):
+		return self._rateBoost
 
 	def _set_pitch(self, vl):
 		self._pitch = self._percentToParam(vl,minPitch,maxPitch)
@@ -259,7 +266,7 @@ class SynthDriver(SynthDriver):
 		if idx and len(idx) > 1:
 			synthIndexReached.notify(synth=self, index=idx.pop(0))
 		txt = text.translate(self.table).encode('windows-1252', 'replace')
-		self.dll.bst_speak_async(self.handle, on_audio, None, txt, -1, 0, 0)
+		self.dll.bst_speak_async(self.handle, on_audio, None, txt, -1, 0, c_float(4 if self.rateBoost else 1), 0)
 		if not self.speaking: return
 		f = lambda idx=idx: self.done(idx)
 		self.player.feed(b"", 0, onDone=f)
