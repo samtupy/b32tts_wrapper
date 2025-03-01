@@ -161,8 +161,8 @@ MMRESULT WINAPI waveOutCloseHook(HWAVEOUT ptr) {
 	if (winmm_hooked_state->sonic_stream) sonicFlushStream(winmm_hooked_state->sonic_stream);
 	while (winmm_hooked_state->sonic_stream && sonicSamplesAvailable(winmm_hooked_state->sonic_stream)) {
 		short data[1024];
-		DWORD data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, 1024);
-		if (!winmm_hooked_state->async_stop_speaking) waveOutput(data, data_len);
+		DWORD data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, 1024) * sizeof(short);
+		if (!winmm_hooked_state->async_stop_speaking && data_len) waveOutput(data, data_len);
 	}
 	return MMSYSERR_NOERROR;
 }
