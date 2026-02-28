@@ -1,4 +1,6 @@
 import os
+import struct
+import subprocess
 from synthDriverHandler import SynthDriver, synthIndexReached, synthDoneSpeaking, VoiceInfo
 from speech.commands import IndexCommand, PitchCommand, CharacterModeCommand
 import ctypes
@@ -98,18 +100,29 @@ class SynthDriver(SynthDriver):
 		super().__init__()
 		path = os.path.join(os.path.dirname(__file__), 'b32_tts.dll')
 		wrapper_path = os.path.join(os.path.dirname(__file__), 'b32_wrapper.dll')
-		self.dll = ctypes.cdll[wrapper_path]
+		self._dll_path = path
 		self.player = None
 		try:
 			currentSoundcardOutput = config.conf['speech']['outputDevice']
 		except:
 			currentSoundcardOutput = config.conf["audio"]["outputDevice"]
 		self.player = nvwave.WavePlayer(1, 11025, 16, outputDevice=currentSoundcardOutput)
-		self.dll.bst_init_w.argtypes = (ctypes.c_wchar_p,)
-		self.dll.bst_init_w.restype = c_void_p
-		self.dll.bst_free.argtypes = (c_void_p,)
-		self.dll.bst_speak_async.restype = c_void_p
-		self.handle = self.dll.bst_init_w(path)
+		self._helper = None
+		try:
+			self.dll = ctypes.cdll[wrapper_path]
+			self.dll.bst_init_w.argtypes = (ctypes.c_wchar_p,)
+			self.dll.bst_init_w.restype = c_void_p
+			self.dll.bst_free.argtypes = (c_void_p,)
+			self.dll.bst_speak_async.restype = c_void_p
+			self.handle = self.dll.bst_init_w(path)
+			self._use_helper = False
+		except (OSError, AttributeError):
+			# b32_wrapper.dll could not be loaded in-process (e.g. 32-bit DLL in
+			# 64-bit NVDA 2026+, or DLL simply absent). Fall back to the
+			# out-of-process 32-bit helper.
+			self.dll = None
+			self._use_helper = True
+			self._start_helper()
 		global bgQueue
 		bgQueue = queue.Queue()
 		self.bgThread = BgThread()
@@ -120,8 +133,18 @@ class SynthDriver(SynthDriver):
 		self.numberProcessing = False
 		self.abbreviations = True
 		self._phrasePrediction = True
-		self.table = str.maketrans("’", "'")
+		self.table = str.maketrans("\u2019", "'")
 		self.canceled = False
+
+	def _start_helper(self):
+		helper_path = os.path.join(os.path.dirname(__file__), 'b32_helper.exe')
+		self._helper = subprocess.Popen(
+			[helper_path, self._dll_path],
+			stdin=subprocess.PIPE,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.DEVNULL,
+			creationflags=subprocess.CREATE_NO_WINDOW
+		)
 
 	def loadSettings(self, onlyChanged = False):
 		# We can probably remove this in a bit, we override this to make sure people's excitation setting doesn't break across addon versions.
@@ -256,6 +279,12 @@ class SynthDriver(SynthDriver):
 		_execWhenDone(self._speakBg, text, idx, mustBeAsync=True)
 
 	def _speakBg(self, text, idx):
+		if self._use_helper:
+			self._speakBg_helper(text, idx)
+		else:
+			self._speakBg_dll(text, idx)
+
+	def _speakBg_dll(self, text, idx):
 		@bst_async_callback
 		def on_audio(data, size, user):
 			if not self.speaking: return False
@@ -272,6 +301,54 @@ class SynthDriver(SynthDriver):
 		self.player.feed(b"", 0, onDone=f)
 		self.player.idle()
 
+	def _speakBg_helper(self, text, idx):
+		# Restart helper if it died unexpectedly.
+		if self._helper is None or self._helper.poll() is not None:
+			self._start_helper()
+		self.speaking = True
+		# As a dirty hack to make indent nav beeps mostly work, indicate that we've reached the first index immedietly.
+		if idx and len(idx) > 1:
+			synthIndexReached.notify(synth=self, index=idx.pop(0))
+		txt = text.translate(self.table).encode('windows-1252', 'replace')
+		rate_mult = 4.0 if self._rateBoost else 1.0
+		# Send SPEAK command: [uint32 text_len][float32 rate_mult][text bytes]
+		try:
+			self._helper.stdin.write(struct.pack('<If', len(txt), rate_mult))
+			self._helper.stdin.write(txt)
+			self._helper.stdin.flush()
+		except OSError:
+			return
+		# Read audio chunks until end-of-utterance sentinel (chunk_len == 0).
+		while True:
+			hdr = self._helper_read_exact(4)
+			if hdr is None:
+				break
+			chunk_len = struct.unpack('<I', hdr)[0]
+			if chunk_len == 0:
+				break
+			chunk = self._helper_read_exact(chunk_len)
+			if chunk is None:
+				break
+			if self.speaking:
+				self.player.feed(chunk, len(chunk))
+		if not self.speaking:
+			return
+		f = lambda idx=idx: self.done(idx)
+		self.player.feed(b"", 0, onDone=f)
+		self.player.idle()
+
+	def _helper_read_exact(self, n):
+		buf = b""
+		while len(buf) < n:
+			try:
+				chunk = self._helper.stdout.read(n - len(buf))
+			except OSError:
+				return None
+			if not chunk:
+				return None
+			buf += chunk
+		return buf
+
 	def done(self, idx):
 		for i in idx:
 			synthIndexReached.notify(synth=self, index=i)
@@ -281,7 +358,19 @@ class SynthDriver(SynthDriver):
 		self.cancel()
 		bgQueue.put((None, None, None))
 		self.bgThread.join()
-		self.dll.bst_free(self.handle)
+		if self._use_helper:
+			if self._helper is not None:
+				# Send QUIT command then wait for clean exit.
+				try:
+					self._helper.stdin.write(struct.pack('<I', 0xFFFFFFFF))
+					self._helper.stdin.flush()
+				except OSError:
+					pass
+				self._helper.wait(timeout=2)
+				if self._helper.poll() is None:
+					self._helper.kill()
+		else:
+			self.dll.bst_free(self.handle)
 
 	def cancel(self):
 		self.speaking = False
@@ -292,6 +381,13 @@ class SynthDriver(SynthDriver):
 				break
 		if self.player:
 			self.player.stop()
+		if self._use_helper and self._helper is not None:
+			# Send CANCEL command: text_len == 0
+			try:
+				self._helper.stdin.write(struct.pack('<I', 0))
+				self._helper.stdin.flush()
+			except OSError:
+				pass
 
 	def pause(self, switch):
 		if self.player: self.player.pause(switch)

@@ -14,9 +14,10 @@ jobs:
         pip3 install scons
         scons -s
         cp bin/*.dll nvda/synthDrivers
+        cp bin/b32_helper.exe nvda/synthDrivers
         mkdir b32_assets
         cd bin
-        7z a -tzip ../b32_assets/b32_bin.zip *.dll b32_spk.exe
+        7z a -tzip ../b32_assets/b32_bin.zip *.dll b32_spk.exe b32_helper.exe
         cd ..
         cd nvda
         7z a -tzip ../b32_assets/bestspeech.nvda-addon *

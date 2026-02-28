@@ -9,3 +9,4 @@ env.Program("bin/test", "obj/test.cpp", LIBS = ["user32", "winmm", "bin/b32_wrap
 env.Program("bin/test_rapid", "obj/test_rapid.cpp", LIBS = ["user32", "winmm", "bin/b32_wrapper"])
 b32_wrapper_static = env.Object("obj/b32_wrapper_static", "obj/b32_wrapper.cpp", CPPDEFINES = [("b32w_export", "")])
 env.Program("bin/b32_spk", ["obj/argparse.c", b32_wrapper_static, "obj/b32_spk.cpp", sonic], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
+env.Program("bin/b32_helper", [b32_wrapper_static, "obj/b32_helper.cpp", sonic], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
