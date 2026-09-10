@@ -10,3 +10,7 @@ env.Program("bin/test_rapid", "obj/test_rapid.cpp", LIBS = ["user32", "winmm", "
 b32_wrapper_static = env.Object("obj/b32_wrapper_static", "obj/b32_wrapper.cpp", CPPDEFINES = [("b32w_export", "")])
 env.Program("bin/b32_spk", ["obj/argparse.c", b32_wrapper_static, "obj/b32_spk.cpp", sonic], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
 env.Program("bin/b32_helper", [b32_wrapper_static, "obj/b32_helper.cpp", sonic], CPPDEFINES = [("b32w_export", "")], LIBS = ["user32", "winmm", "bin/MinHook"])
+# The proprietary engine can return no audio on hosted Windows runners even
+# though the helper and wrapper are functioning.  This deterministic engine
+# exercises the complete helper protocol and waveOut interception in CI.
+env.SharedLibrary("bin/mock_b32_tts", "tests/mock_b32_tts.cpp", LIBS = ["winmm"])

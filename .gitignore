@@ -1,5 +1,10 @@
 obj
 output
+outputs
+build-local
+b32_assets
+__pycache__
+*.pyc
 .sconsign.dblite
 *.dll
 *.exe
@@ -11,3 +16,5 @@ output
 *.wav
 !bin/b32_tts.dll
 !bin/MinHook.lib
+/nvda/LICENSE
+/nvda/deps.txt

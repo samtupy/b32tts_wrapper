@@ -1,5 +1,6 @@
 import struct
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -8,7 +9,7 @@ repo = Path(__file__).parents[1]
 helper = repo / "bin" / "b32_helper.exe"
 if not helper.exists():
 	helper = repo / "build-local" / "b32_helper.exe"
-engine = repo / "bin" / "b32_tts.dll"
+engine = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else repo / "bin" / "b32_tts.dll"
 ready = b"BSTR"
 
 
@@ -23,6 +24,8 @@ def read_exact(stream, size):
 
 
 def start_helper():
+	assert helper.is_file(), f"helper is missing: {helper}"
+	assert engine.is_file(), f"test engine is missing: {engine}"
 	process = subprocess.Popen(
 		[str(helper), str(engine)],
 		stdin=subprocess.PIPE,
@@ -91,4 +94,4 @@ payload = b"invalid speed"
 process.stdin.write(struct.pack("<If", len(payload), float("nan")) + payload)
 process.stdin.flush()
 assert process.wait(timeout=5) == 0
-print("Helper release regressions: OK")
+print(f"Helper release regressions: OK ({engine.name})")
