@@ -1,5 +1,6 @@
 import os
 import re
+import struct
 import sys
 import zipfile
 from pathlib import Path
@@ -22,7 +23,12 @@ with zipfile.ZipFile(package) as archive:
 	assert not any(name.startswith("bin/") for name in names), "native files must be beside the synth driver"
 	assert not any("__pycache__" in name or name.endswith(".pyc") for name in names), "package contains Python cache files"
 	for binary in required & {name for name in required if name.endswith((".dll", ".exe"))}:
-		assert archive.read(binary)[:2] == b"MZ", f"{binary} is not a Windows binary"
+		image = archive.read(binary)
+		assert image[:2] == b"MZ", f"{binary} is not a Windows binary"
+		peOffset = struct.unpack_from("<I", image, 0x3C)[0]
+		assert image[peOffset:peOffset + 4] == b"PE\0\0", f"{binary} has no PE header"
+		machine = struct.unpack_from("<H", image, peOffset + 4)[0]
+		assert machine == 0x14C, f"{binary} must be 32-bit x86, found PE machine 0x{machine:04X}"
 	manifest = archive.read("manifest.ini").decode("utf-8-sig")
 	dependency_notices = archive.read("deps.txt").decode("utf-8-sig")
 	assert "Sonic" in dependency_notices and "Apache License" in dependency_notices

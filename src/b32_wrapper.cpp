@@ -90,7 +90,7 @@ LRESULT CALLBACK on_rel_buf(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 		// its thread-local state instead of dereferencing a stale null pointer.
 		if (winmm_hooked_state) winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
 	}
-	else if (message == WM_DESTROY) PostQuitMessage(0);
+	else if (message == WM_DESTROY) return 0;
 	else return DefWindowProc(hwnd, message, wParam, lParam);
 	return 0;
 }
@@ -210,7 +210,10 @@ MMRESULT WINAPI waveOutResetHook(HWAVEOUT ptr) {
 MMRESULT WINAPI waveOutCloseHook(HWAVEOUT ptr) {
 	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutCloseProc(ptr);
 	// We need to flush sonic's buffer and feed any remaining output to either the callback or our memory output.
-	if (winmm_hooked_state->sonic_stream) sonicFlushStream(winmm_hooked_state->sonic_stream);
+	if (winmm_hooked_state->sonic_stream && !sonicFlushStream(winmm_hooked_state->sonic_stream)) {
+		winmm_hooked_state->async_stop_speaking = true;
+		return MMSYSERR_NOMEM;
+	}
 	while (winmm_hooked_state->sonic_stream && sonicSamplesAvailable(winmm_hooked_state->sonic_stream)) {
 		short data[1024];
 		DWORD data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, 1024) * sizeof(short);

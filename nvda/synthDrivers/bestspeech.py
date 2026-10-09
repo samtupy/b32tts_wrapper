@@ -47,30 +47,22 @@ bst_async_callback = CFUNCTYPE(c_long, c_void_p, c_long, c_void_p)
 
 # The BGThread from espeak
 class BgThread(threading.Thread):
-	def __init__(self):
+	def __init__(self, workQueue):
 		super().__init__(name=f"{self.__class__.__module__}.{self.__class__.__qualname__}")
 		self.daemon = True
+		self._queue = workQueue
 
 	def run(self):
 		while True:
-			func, args, kwargs = bgQueue.get()
+			func, args, kwargs = self._queue.get()
 			if not func:
+				self._queue.task_done()
 				break
 			try:
 				func(*args, **kwargs)
 			except:  # noqa: E722
 				log.error("Error running function from queue", exc_info=True)
-			bgQueue.task_done()
-
-
-def _execWhenDone(func, *args, mustBeAsync=False, **kwargs):
-	global bgQueue
-	if mustBeAsync or bgQueue.unfinished_tasks != 0:
-		# Either this operation must be asynchronous or There is still an operation in progress.
-		# Therefore, run this asynchronously in the background thread.
-		bgQueue.put((func, args, kwargs))
-	else:
-		func(*args, **kwargs)
+			self._queue.task_done()
 
 class SynthDriver(SynthDriver):
 	name = 'bestspeech'
@@ -113,7 +105,11 @@ class SynthDriver(SynthDriver):
 			currentSoundcardOutput = config.conf["audio"]["outputDevice"]
 		self.player = nvwave.WavePlayer(1, 11025, 16, outputDevice=currentSoundcardOutput)
 		self._helperWriteLock = threading.Lock()
+		self._helperStateLock = threading.Lock()
 		self._helper = None
+		self._terminating = False
+		self._generation = 0
+		self._bgQueue = queue.Queue()
 		try:
 			self.dll = ctypes.cdll[wrapper_path]
 			self.dll.bst_init_w.argtypes = (ctypes.c_wchar_p,)
@@ -135,9 +131,7 @@ class SynthDriver(SynthDriver):
 			self.dll = None
 			self._use_helper = True
 			self._start_helper()
-		global bgQueue
-		bgQueue = queue.Queue()
-		self.bgThread = BgThread()
+		self.bgThread = BgThread(self._bgQueue)
 		self.bgThread.start()
 		self.rate = 90
 		self.rateBoost = False
@@ -150,6 +144,9 @@ class SynthDriver(SynthDriver):
 		self.canceled = False
 
 	def _start_helper(self):
+		with self._helperStateLock:
+			if self._terminating:
+				raise RuntimeError("The BeSTspeech driver is terminating")
 		helper_path = os.path.join(os.path.dirname(__file__), 'b32_helper.exe')
 		if not os.path.isfile(helper_path):
 			raise RuntimeError("The 32-bit BeSTspeech helper is missing")
@@ -160,6 +157,11 @@ class SynthDriver(SynthDriver):
 			stderr=subprocess.DEVNULL,
 			creationflags=subprocess.CREATE_NO_WINDOW
 		)
+		with self._helperStateLock:
+			if self._terminating:
+				helper.kill()
+				raise RuntimeError("The BeSTspeech driver is terminating")
+			self._helper = helper
 		startupResult = queue.Queue(maxsize=1)
 		def readStartupResult():
 			try:
@@ -172,13 +174,31 @@ class SynthDriver(SynthDriver):
 		except queue.Empty:
 			ready = b""
 		if ready != HELPER_READY:
+			with self._helperStateLock:
+				if self._helper is helper:
+					self._helper = None
 			try:
 				helper.kill()
 				helper.wait(timeout=2)
 			except (OSError, subprocess.TimeoutExpired):
 				pass
 			raise RuntimeError("The BeSTspeech helper failed to initialize")
-		self._helper = helper
+		with self._helperStateLock:
+			if self._terminating or self._helper is not helper:
+				try:
+					helper.kill()
+				except OSError:
+					pass
+				raise RuntimeError("The BeSTspeech driver terminated during helper startup")
+
+	def _execWhenDone(self, func, *args, mustBeAsync=False, **kwargs):
+		if mustBeAsync or self._bgQueue.unfinished_tasks != 0:
+			self._bgQueue.put((func, args, kwargs))
+		else:
+			func(*args, **kwargs)
+
+	def _isCurrent(self, generation):
+		return not self._terminating and generation == self._generation
 
 	def loadSettings(self, onlyChanged = False):
 		# We can probably remove this in a bit, we override this to make sure people's excitation setting doesn't break across addon versions.
@@ -291,7 +311,8 @@ class SynthDriver(SynthDriver):
 	def _formatNumbers(self, text):
 		def replace_num(m):
 			num_str = m.group(0)
-			return format(int(num_str), ",")
+			firstGroup = len(num_str) % 3 or 3
+			return num_str[:firstGroup] + "".join("," + num_str[i:i + 3] for i in range(firstGroup, len(num_str), 3))
 		return re.sub(r"\b\d{5,}\b", replace_num, text)
 
 	def speak(self, speechSequence):
@@ -339,73 +360,84 @@ class SynthDriver(SynthDriver):
 				lst.append(f"~f{f}]")
 		if hasText:
 			segments.append([self._formatSpeechSegment(lst), []])
-		_execWhenDone(self._speakBg, segments, leadingIndexes, mustBeAsync=True)
+		generation = self._generation
+		self._execWhenDone(self._speakBg, segments, leadingIndexes, generation, mustBeAsync=True)
 
 	def _formatSpeechSegment(self, commands):
 		text = " ".join(commands)
 		if self._numberProcessing: text = self._formatNumbers(text)
 		return f"~r{self._rate}]~e{self._excitation}]~v{self.headsize}]~f{self._pitch}]~g{self._volume}]~u{self._unvoicedVolume}]~h{self._inflection}]{text} ~|"
 
-	def _speakBg(self, segments, leadingIndexes):
+	def _speakBg(self, segments, leadingIndexes, generation):
+		if not self._isCurrent(generation):
+			return
 		if self._use_helper:
-			self._speakBg_helper(segments, leadingIndexes)
+			self._speakBg_helper(segments, leadingIndexes, generation)
 		else:
-			self._speakBg_dll(segments, leadingIndexes)
+			self._speakBg_dll(segments, leadingIndexes, generation)
 
-	def _queueIndexes(self, indexes):
+	def _queueIndexes(self, indexes, generation):
 		if indexes:
-			self.player.feed(b"", 0, onDone=lambda indexes=tuple(indexes): self._notifyIndexes(indexes))
+			self.player.feed(b"", 0, onDone=lambda indexes=tuple(indexes): self._notifyIndexes(indexes, generation))
 
-	def _notifyIndexes(self, indexes):
+	def _notifyIndexes(self, indexes, generation):
+		if not self._isCurrent(generation):
+			return
 		for index in indexes:
 			synthIndexReached.notify(synth=self, index=index)
 
-	def _speechFailed(self, message):
+	def _speechFailed(self, message, generation):
+		if not self._isCurrent(generation):
+			return
 		log.error(message)
 		self.speaking = False
 		if self.player:
 			self.player.stop()
 		synthDoneSpeaking.notify(synth=self)
 
-	def _speakBg_dll(self, segments, leadingIndexes):
+	def _speakBg_dll(self, segments, leadingIndexes, generation):
 		@bst_async_callback
 		def on_audio(data, size, user):
-			if not self.speaking: return False
+			if not self.speaking or not self._isCurrent(generation): return False
 			self.player.feed(data, size)
 			return True
+		if not self._isCurrent(generation): return
 		self.speaking = True
-		self._notifyIndexes(leadingIndexes)
+		self._notifyIndexes(leadingIndexes, generation)
 		for text, indexes in segments:
 			txt = text.translate(self.table).encode('windows-1252', 'replace')
 			self.dll.bst_speak_async(self.handle, on_audio, None, txt, -1, 0, c_float(4 if self.rateBoost else 1), 0)
-			if not self.speaking: return
-			self._queueIndexes(indexes)
-		self.player.feed(b"", 0, onDone=self.done)
+			if not self.speaking or not self._isCurrent(generation): return
+			self._queueIndexes(indexes, generation)
+		self.player.feed(b"", 0, onDone=lambda: self.done(generation))
 		self.player.idle()
 
-	def _speakBg_helper(self, segments, leadingIndexes):
+	def _speakBg_helper(self, segments, leadingIndexes, generation):
+		if not self._isCurrent(generation): return
 		# Restart helper if it died unexpectedly.
 		if self._helper is None or self._helper.poll() is not None:
 			try:
 				self._start_helper()
 			except (OSError, RuntimeError):
 				log.error("Unable to start the BeSTspeech helper", exc_info=True)
-				self.speaking = True
-				self._speechFailed("The BeSTspeech helper could not be started")
+				self._speechFailed("The BeSTspeech helper could not be started", generation)
 				return
+		if not self._isCurrent(generation): return
 		self.speaking = True
-		self._notifyIndexes(leadingIndexes)
+		self._notifyIndexes(leadingIndexes, generation)
 		for text, indexes in segments:
-			if not self._speakHelperSegment(text):
-				if self.speaking:
-					self._speechFailed("The BeSTspeech helper stopped responding")
+			if not self._speakHelperSegment(text, generation):
+				if self.speaking and self._isCurrent(generation):
+					self._speechFailed("The BeSTspeech helper stopped responding", generation)
 				return
-			if not self.speaking: return
-			self._queueIndexes(indexes)
-		self.player.feed(b"", 0, onDone=self.done)
+			if not self.speaking or not self._isCurrent(generation): return
+			self._queueIndexes(indexes, generation)
+		self.player.feed(b"", 0, onDone=lambda: self.done(generation))
 		self.player.idle()
 
-	def _speakHelperSegment(self, text):
+	def _speakHelperSegment(self, text, generation):
+		if not self._isCurrent(generation):
+			return True
 		helper = self._helper
 		if helper is None:
 			return False
@@ -430,7 +462,7 @@ class SynthDriver(SynthDriver):
 				return False
 			chunk = self._helper_read_exact(helper, chunk_len)
 			if chunk is None: return False
-			if self.speaking:
+			if self.speaking and self._isCurrent(generation):
 				self.player.feed(chunk, len(chunk))
 
 	def _helper_read_exact(self, helper, n):
@@ -445,11 +477,15 @@ class SynthDriver(SynthDriver):
 			buf += chunk
 		return buf
 
-	def done(self):
+	def done(self, generation=None):
+		if generation is not None and not self._isCurrent(generation):
+			return
 		self.speaking = False
 		synthDoneSpeaking.notify(synth=self)
 
 	def terminate(self):
+		with self._helperStateLock:
+			self._terminating = True
 		self.cancel()
 		# Stop the helper first. The background thread may be blocked reading its
 		# stdout, and cannot consume the queue sentinel until that pipe closes.
@@ -458,8 +494,8 @@ class SynthDriver(SynthDriver):
 		else:
 			# The wrapper's hidden WinMM window must be destroyed by the same
 			# thread that created it during synthesis.
-			bgQueue.put((self._free_direct, (), {}))
-		bgQueue.put((None, None, None))
+			self._bgQueue.put((self._free_direct, (), {}))
+		self._bgQueue.put((None, None, None))
 		self.bgThread.join(timeout=3)
 		if self.bgThread.is_alive():
 			log.error("BeSTspeech background thread did not stop during termination")
@@ -470,8 +506,9 @@ class SynthDriver(SynthDriver):
 			self.handle = None
 
 	def _stop_helper(self):
-		helper = self._helper
-		self._helper = None
+		with self._helperStateLock:
+			helper = self._helper
+			self._helper = None
 		if helper is None:
 			return
 		try:
@@ -493,14 +530,15 @@ class SynthDriver(SynthDriver):
 				log.error("Unable to stop the BeSTspeech helper process")
 
 	def cancel(self):
+		self._generation += 1
 		self.speaking = False
 		while True:
 			try:
-				item = bgQueue.get_nowait()
+				item = self._bgQueue.get_nowait()
 			except queue.Empty:
 				break
 			else:
-				bgQueue.task_done()
+				self._bgQueue.task_done()
 		if self.player:
 			self.player.stop()
 		if self._use_helper and self._helper is not None:

@@ -53,6 +53,15 @@ def read_utterance(process):
 
 process = start_helper()
 try:
+	# A CANCEL arriving in the same pipe write as SPEAK must cancel that command;
+	# the helper must not clear the cancellation just before synthesis begins.
+	payload = ("Pre-start cancellation. " * 500).encode("windows-1252")
+	process.stdin.write(struct.pack("<If", len(payload), 1.0) + payload + struct.pack("<I", 0))
+	process.stdin.flush()
+	assert len(read_utterance(process)) == 0
+	send_speak(process, "Speech after pre-start cancellation.")
+	assert read_utterance(process)
+
 	for speed in (1.0, 4.0, 0.75):
 		send_speak(process, "BeSTspeech release regression. " * 8, speed)
 		audio = read_utterance(process)
@@ -93,5 +102,12 @@ process = start_helper()
 payload = b"invalid speed"
 process.stdin.write(struct.pack("<If", len(payload), float("nan")) + payload)
 process.stdin.flush()
+assert process.wait(timeout=5) == 0
+
+# EOF in a truncated command must promptly cancel active synthesis and exit.
+process = start_helper()
+send_speak(process, "EOF cancellation test. " * 1000)
+process.stdin.write(struct.pack("<I", 20) + b"\x00\x00")
+process.stdin.close()
 assert process.wait(timeout=5) == 0
 print(f"Helper release regressions: OK ({engine.name})")

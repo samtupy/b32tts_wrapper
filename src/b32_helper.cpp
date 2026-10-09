@@ -28,8 +28,8 @@
 #include <string.h>
 #include "b32_wrapper.h"
 
-// Set to true by the stdin thread to abort the current synthesis callback.
-static std::atomic_bool g_cancel(false);
+// Advanced by the stdin thread to abort speech accepted in an older generation.
+static std::atomic_uint32_t g_cancel_generation(0);
 // Set to true when the helper should exit cleanly.
 static std::atomic_bool g_quit(false);
 
@@ -41,6 +41,7 @@ struct PendingCmd {
     char*    text;
     uint32_t text_len;
     float    rate_mult;
+    uint32_t generation;
     bool     valid;
 };
 
@@ -53,16 +54,19 @@ static const uint32_t     HELPER_READY = 0x52545342u;
 
 // ---------------------------------------------------------------------------
 
-static bool audio_cb(char* data, long size, void* /*user*/)
+struct AudioContext { uint32_t generation; };
+
+static bool audio_cb(char* data, long size, void* user)
 {
-    if (g_cancel) return false;
+    const AudioContext* context = static_cast<const AudioContext*>(user);
+    if (!context || g_quit || g_cancel_generation.load() != context->generation) return false;
     if (!data || size <= 0) return true;
 
     uint32_t len = (uint32_t)size;
     if (fwrite(&len, sizeof(uint32_t), 1, stdout) != 1) return false;
     if (fwrite(data, 1, (size_t)size, stdout) != (size_t)size) return false;
     fflush(stdout);
-    return !g_cancel;
+    return !g_quit && g_cancel_generation.load() == context->generation;
 }
 
 // Reads exactly `n` bytes from `fp` into `buf`.  Returns false on short read.
@@ -79,36 +83,38 @@ static bool read_exact(FILE* fp, void* buf, size_t n)
 
 // ---------------------------------------------------------------------------
 // Stdin reader thread: runs for the lifetime of the process.
-// Parses incoming commands and either sets g_cancel / g_quit, or enqueues a
+// Parses incoming commands and either advances cancellation / quits, or enqueues a
 // SPEAK command for the main thread.
 // ---------------------------------------------------------------------------
 static DWORD WINAPI stdin_reader(LPVOID /*unused*/)
 {
     while (true) {
+        if (g_quit) return 0;
         uint32_t text_len = 0;
         if (!read_exact(stdin, &text_len, sizeof(uint32_t))) {
             // EOF or read error -> quit
             g_quit = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
 
         if (text_len == 0xFFFFFFFFu) {
             g_quit   = true;
-            g_cancel = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
 
         if (text_len == 0) {
             // Cancel: abort whatever synthesis is currently running.
-            g_cancel = true;
+            ++g_cancel_generation;
             continue;
         }
 
         if (text_len > MAX_TEXT_LENGTH) {
             g_quit = true;
-            g_cancel = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
@@ -116,13 +122,14 @@ static DWORD WINAPI stdin_reader(LPVOID /*unused*/)
         float rate_mult = 1.0f;
         if (!read_exact(stdin, &rate_mult, sizeof(float))) {
             g_quit = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
 
         if (!isfinite(rate_mult) || rate_mult < 0.1f || rate_mult > 10.0f) {
             g_quit = true;
-            g_cancel = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
@@ -130,13 +137,14 @@ static DWORD WINAPI stdin_reader(LPVOID /*unused*/)
         char* text = new (std::nothrow) char[text_len + 1];
         if (!text) {
             g_quit = true;
-            g_cancel = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
         if (!read_exact(stdin, text, text_len)) {
             delete[] text;
             g_quit = true;
+            ++g_cancel_generation;
             SetEvent(g_cmd_event);
             return 0;
         }
@@ -151,6 +159,7 @@ static DWORD WINAPI stdin_reader(LPVOID /*unused*/)
         g_pending.text     = text;
         g_pending.text_len = text_len;
         g_pending.rate_mult = rate_mult;
+        g_pending.generation = g_cancel_generation.load();
         g_pending.valid    = true;
         LeaveCriticalSection(&g_pending_cs);
 
@@ -210,15 +219,14 @@ int wmain(int argc, wchar_t** argv)
 
         if (!cmd.valid) continue;
 
-        g_cancel = false;
-        // A QUIT may have arrived after this command was dequeued. Checking
-        // after clearing an earlier CANCEL avoids overwriting the quit signal.
         if (g_quit) {
-            g_cancel = true;
             delete[] cmd.text;
             break;
         }
-        bst_speak_async(state, audio_cb, nullptr, cmd.text, -1, 0, cmd.rate_mult, 0);
+        AudioContext context = {cmd.generation};
+        if (g_cancel_generation.load() == cmd.generation) {
+            bst_speak_async(state, audio_cb, &context, cmd.text, -1, 0, cmd.rate_mult, 0);
+        }
         delete[] cmd.text;
 
         // Always emit end-of-utterance sentinel, even if cancelled.
@@ -231,8 +239,16 @@ int wmain(int argc, wchar_t** argv)
 
     // If stdout failed, the reader may still be blocked on an open stdin pipe.
     // Cancel that synchronous read so process shutdown cannot hang forever.
-    CancelSynchronousIo(reader_thread);
-    WaitForSingleObject(reader_thread, INFINITE);
+    ++g_cancel_generation;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (WaitForSingleObject(reader_thread, 100) == WAIT_OBJECT_0) break;
+        CancelSynchronousIo(reader_thread);
+        CancelIoEx((HANDLE)_get_osfhandle(_fileno(stdin)), NULL);
+    }
+    if (WaitForSingleObject(reader_thread, 0) != WAIT_OBJECT_0) {
+        TerminateThread(reader_thread, 1);
+        WaitForSingleObject(reader_thread, 1000);
+    }
     CloseHandle(reader_thread);
     EnterCriticalSection(&g_pending_cs);
     if (g_pending.valid) delete[] g_pending.text;

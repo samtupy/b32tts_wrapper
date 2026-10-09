@@ -64,8 +64,10 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 captured = []
-module._execWhenDone = lambda func, *args, **kwargs: captured.append((func, args))
 driver = module.SynthDriver.__new__(module.SynthDriver)
+driver._generation = 0
+driver._terminating = False
+driver._execWhenDone = lambda func, *args, **kwargs: captured.append((func, args))
 driver._abbreviations = driver._phrasePrediction = True
 driver._numberProcessing = False
 driver._rate, driver._excitation, driver._headsize = 0, "3", "1"
@@ -79,15 +81,16 @@ assert bareDriver._headsize == "1" and bareDriver._excitation == "3"
 assert bareDriver._pitch == 80 and bareDriver._inflection == 0 and bareDriver._unvoicedVolume == 0
 
 driver.speak([IndexCommand(1), "first", IndexCommand(2), "second", IndexCommand(3)])
-segments, leading = captured.pop()[1]
+segments, leading, generation = captured.pop()[1]
 assert leading == [1]
+assert generation == 0
 assert [segment[1] for segment in segments] == [[2], [3]]
 
 driver.speak([
 	CharacterModeCommand(True), PitchCommand(1.5), "A", IndexCommand(4),
 	"B", IndexCommand(5), CharacterModeCommand(False), PitchCommand(1), "normal",
 ])
-segments, leading = captured.pop()[1]
+segments, leading, _ = captured.pop()[1]
 assert not leading and len(segments) == 3
 assert "~n1,1]" in segments[0][0] and "~f120]" in segments[0][0]
 assert "~n1,1]" in segments[1][0] and "~f120]" in segments[1][0]
@@ -96,15 +99,15 @@ assert "~n1,0]" in segments[2][0] and "~f80]" in segments[2][0]
 # A sequence that ends while spelling must not leave the persistent legacy
 # engine in character mode for the next normal utterance.
 driver.speak([CharacterModeCommand(True), "X"])
-spellingSegments, _ = captured.pop()[1]
+spellingSegments, _, _ = captured.pop()[1]
 assert "~n1,1]" in spellingSegments[0][0]
 driver.speak(["This must be spoken normally."])
-normalSegments, _ = captured.pop()[1]
+normalSegments, _, _ = captured.pop()[1]
 assert "~n1,0]" in normalSegments[0][0]
 assert normalSegments[0][0].index("~n1,0]") < normalSegments[0][0].index("This must be spoken normally.")
 
 driver.speak([PitchCommand(100), "clamped pitch"])
-clampedSegments, _ = captured.pop()[1]
+clampedSegments, _, _ = captured.pop()[1]
 assert f"~f{module.maxPitch}]" in clampedSegments[0][0]
 
 driver._set_headsize("0")
@@ -113,6 +116,23 @@ assert driver._headsize == "1" and driver._excitation == "3"
 driver._set_headsize("corrupt")
 driver._set_excitation(None)
 assert driver._headsize == "1" and driver._excitation == "3"
+
+# Group arbitrarily long digit strings without converting them to int (Python
+# 3.11+ limits decimal conversion length by default).
+hugeNumber = "1" * 5000
+formattedNumber = driver._formatNumbers(hugeNumber)
+assert formattedNumber.replace(",", "") == hugeNumber
+assert formattedNumber.count(",") == 1666
+
+# A canceled generation must never deliver stale indexes or completion events.
+indexCalls = len(indexEvent.calls)
+doneCalls = len(doneEvent.calls)
+driver._generation = 2
+driver._notifyIndexes([99], 1)
+driver.speaking = True
+driver.done(1)
+assert len(indexEvent.calls) == indexCalls and len(doneEvent.calls) == doneCalls
+assert driver.speaking
 driver.speaking = True
 driver.done()
 assert not driver.speaking and len(doneEvent.calls) == 1
