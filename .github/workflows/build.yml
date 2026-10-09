@@ -1,7 +1,10 @@
 name: build
 on:
   workflow_dispatch:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - "*"
 jobs:
@@ -9,18 +12,17 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
-    - name: build
+    - name: Build, test, and package
+      shell: pwsh
       run: |
-        pip3 install scons
-        scons -s
-        cp bin/*.dll nvda/synthDrivers
-        mkdir b32_assets
-        cd bin
-        7z a -tzip ../b32_assets/b32_bin.zip *.dll b32_spk.exe
-        cd ..
-        cd nvda
-        7z a -tzip ../b32_assets/bestspeech.nvda-addon *
-        cd ..
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+        python -m pip install scons==4.11.1
+        ./nvda/build.ps1 -UseMockEngine
+        New-Item -ItemType Directory -Path b32_assets -Force | Out-Null
+        $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.TrimStart("v") } else { (Select-String -Path nvda/manifest.ini -Pattern '^version\s*=\s*"?([^"\r\n]+)').Matches[0].Groups[1].Value.Trim() }
+        Copy-Item -LiteralPath "nvda/outputs/BestSpeech-$version.nvda-addon" -Destination "b32_assets/BestSpeech-$version.nvda-addon"
+        Compress-Archive -LiteralPath @("bin/b32_tts.dll", "bin/b32_wrapper.dll", "bin/b32_spk.exe", "bin/b32_helper.exe", "LICENSE", "deps.txt") -DestinationPath b32_assets/b32_bin.zip -CompressionLevel Optimal -Force
     - uses: actions/upload-artifact@v4
       with:
         name: b32_assets
@@ -34,11 +36,21 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: actions/download-artifact@v4
-    - uses: ghalactic/github-release-from-tag@v5
       with:
-        checksumGenerateAssets: "false"
-        assets: |
-          - path: b32_assets/b32_bin.zip
-            name: b32_bin_${{github.ref_name}}.zip
-          - path: b32_assets/bestspeech.nvda-addon
-            name: bestspeech_${{github.ref_name}}.nvda-addon
+        name: b32_assets
+        path: b32_assets
+    - name: Publish when the release does not already exist
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $tag = $env:GITHUB_REF_NAME
+        if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
+          Write-Output "Release $tag already exists; no duplicate release was created."
+          exit 0
+        }
+        $version = $tag.TrimStart("v")
+        $assets = Get-ChildItem -LiteralPath ./b32_assets -File | Select-Object -ExpandProperty FullName
+        gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "BeSTSpeech TTS for NVDA $version" --notes "Release package for BeSTSpeech TTS for NVDA $version."
+        if ($LASTEXITCODE -ne 0) { throw "GitHub release creation failed with exit code $LASTEXITCODE" }

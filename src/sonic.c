@@ -479,13 +479,15 @@ static int enlargeOutputBufferIfNeeded(sonicStream stream, int numSamples) {
   int outputBufferSize = stream->outputBufferSize;
 
   if (stream->numOutputSamples + numSamples > outputBufferSize) {
-    stream->outputBufferSize += (outputBufferSize >> 1) + numSamples;
-    stream->outputBuffer = (short*)sonicRealloc(
-        stream->outputBuffer, outputBufferSize, stream->outputBufferSize,
+    int newOutputBufferSize = outputBufferSize + (outputBufferSize >> 1) + numSamples;
+    short* newOutputBuffer = (short*)sonicRealloc(
+        stream->outputBuffer, outputBufferSize, newOutputBufferSize,
         sizeof(short) * stream->numChannels);
-    if (stream->outputBuffer == NULL) {
+    if (newOutputBuffer == NULL) {
       return 0;
     }
+    stream->outputBuffer = newOutputBuffer;
+    stream->outputBufferSize = newOutputBufferSize;
   }
   return 1;
 }
@@ -495,13 +497,15 @@ static int enlargeInputBufferIfNeeded(sonicStream stream, int numSamples) {
   int inputBufferSize = stream->inputBufferSize;
 
   if (stream->numInputSamples + numSamples > inputBufferSize) {
-    stream->inputBufferSize += (inputBufferSize >> 1) + numSamples;
-    stream->inputBuffer = (short*)sonicRealloc(
-        stream->inputBuffer, inputBufferSize, stream->inputBufferSize,
+    int newInputBufferSize = inputBufferSize + (inputBufferSize >> 1) + numSamples;
+    short* newInputBuffer = (short*)sonicRealloc(
+        stream->inputBuffer, inputBufferSize, newInputBufferSize,
         sizeof(short) * stream->numChannels);
-    if (stream->inputBuffer == NULL) {
+    if (newInputBuffer == NULL) {
       return 0;
     }
+    stream->inputBuffer = newInputBuffer;
+    stream->inputBufferSize = newInputBufferSize;
   }
   return 1;
 }
@@ -904,10 +908,15 @@ static int moveNewSamplesToPitchBuffer(sonicStream stream,
   int pitchBufferSize = stream->pitchBufferSize;
 
   if (stream->numPitchSamples + numSamples > pitchBufferSize) {
-    stream->pitchBufferSize += (pitchBufferSize >> 1) + numSamples;
-    stream->pitchBuffer = (short*)sonicRealloc(
-        stream->pitchBuffer, pitchBufferSize, stream->pitchBufferSize,
+    int newPitchBufferSize = pitchBufferSize + (pitchBufferSize >> 1) + numSamples;
+    short* newPitchBuffer = (short*)sonicRealloc(
+        stream->pitchBuffer, pitchBufferSize, newPitchBufferSize,
         sizeof(short) * numChannels);
+    if (newPitchBuffer == NULL) {
+      return 0;
+    }
+    stream->pitchBuffer = newPitchBuffer;
+    stream->pitchBufferSize = newPitchBufferSize;
   }
   memcpy(stream->pitchBuffer + stream->numPitchSamples * numChannels,
          stream->outputBuffer + originalNumOutputSamples * numChannels,
@@ -1170,7 +1179,9 @@ static int processStreamInput(sonicStream stream) {
   localSpeed =
       stream->numInputSamples * stream->samplePeriod / stream->inputPlayTime;
   if (localSpeed > 1.00001 || localSpeed < 0.99999) {
-    changeSpeed(stream, localSpeed);
+    if (!changeSpeed(stream, localSpeed)) {
+      return 0;
+    }
   } else {
     if (!copyInputToOutput(stream, stream->numInputSamples)) {
       return 0;

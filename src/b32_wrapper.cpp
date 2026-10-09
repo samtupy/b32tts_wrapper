@@ -2,6 +2,9 @@
 // This is released into the public domain.
 
 #include <stdio.h> // _snprintf
+#include <stdlib.h>
+#include <limits.h>
+#include <math.h>
 #include <windows.h>
 #include "b32_wrapper.h"
 #include "MinHook.h"
@@ -82,8 +85,12 @@ HINSTANCE g_hinstance = nullptr;
 // If bstRelBuf is not called from a windows message loop the same number of times that waveOutWrite is called, TtsWav will never return! We acomplish this with a hidden message window. We could theoretically just minhook PeekMessage or create a WH_GETMESSAGE hook with SetWindowsHookExA, but the way we're doing it is the most standard and correct, for whatever that's worth.
 #define WM_REL_BUF (WM_USER + 1)
 LRESULT CALLBACK on_rel_buf(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-	if (message == WM_REL_BUF) winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
-	else if (message == WM_DESTROY) PostQuitMessage(0);
+	if (message == WM_REL_BUF) {
+		// Ignore a delayed release message after synthesis has already detached
+		// its thread-local state instead of dereferencing a stale null pointer.
+		if (winmm_hooked_state) winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
+	}
+	else if (message == WM_DESTROY) return 0;
 	else return DefWindowProc(hwnd, message, wParam, lParam);
 	return 0;
 }
@@ -98,6 +105,7 @@ HWND create_message_window() {
 	return CreateWindowExW(0, L"b32tts_wrapper_class", L"b32tts_wrapper_window", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hinstance, nullptr);
 }
 b32w_export BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
+	(void)reserved;
 	if (reason == DLL_PROCESS_ATTACH) g_hinstance = module;
 	else if (reason == DLL_PROCESS_DETACH && winmm_hooked) {
 		MH_DisableHook(MH_ALL_HOOKS);
@@ -112,6 +120,10 @@ MMRESULT WINAPI waveOutOpenHook(LPHWAVEOUT outptr, UINT device, LPCWAVEFORMATEX 
 	*outptr = (HWAVEOUT)callback; // Now all other hooks will receive state information in their first parameter, though we prefer to use winmm_hooked_state. This also makes sure our hook returns a semblance of what the calling function is expecting.
 	if (!winmm_hooked_state->audio && !winmm_hooked_state->async_callback) {
 		winmm_hooked_state->audio = (char*)malloc(winmm_hooked_state->audio_capacity);
+		if (!winmm_hooked_state->audio) {
+			winmm_hooked_state->async_stop_speaking = true;
+			return MMSYSERR_NOMEM;
+		}
 		if (winmm_hooked_state->audio_size) make_wav_header_in_place((wav_header*)winmm_hooked_state->audio, 0, format->nSamplesPerSec, format->wBitsPerSample, format->nChannels, format->wFormatTag);
 	}
 	return MMSYSERR_NOERROR;
@@ -128,9 +140,28 @@ inline void waveOutput(short* data, DWORD data_len) {
 			return;
 		}
 	} else {
-		if (winmm_hooked_state->audio_size + data_len >= winmm_hooked_state->audio_capacity) {
-			winmm_hooked_state->audio_capacity *= 2;
-			winmm_hooked_state->audio = (char*)realloc(winmm_hooked_state->audio, winmm_hooked_state->audio_capacity);
+		if (winmm_hooked_state->async_stop_speaking) return;
+		if (data_len > (DWORD)(LONG_MAX - winmm_hooked_state->audio_size)) {
+			winmm_hooked_state->async_stop_speaking = true;
+			return;
+		}
+		const long required = winmm_hooked_state->audio_size + (long)data_len;
+		if (required > winmm_hooked_state->audio_capacity) {
+			long new_capacity = winmm_hooked_state->audio_capacity;
+			while (new_capacity < required) {
+				if (new_capacity > LONG_MAX / 2) {
+					new_capacity = required;
+					break;
+				}
+				new_capacity *= 2;
+			}
+			char* resized = (char*)realloc(winmm_hooked_state->audio, new_capacity);
+			if (!resized) {
+				winmm_hooked_state->async_stop_speaking = true;
+				return;
+			}
+			winmm_hooked_state->audio = resized;
+			winmm_hooked_state->audio_capacity = new_capacity;
 		}
 		memcpy(winmm_hooked_state->audio + winmm_hooked_state->audio_size, data, data_len);
 		winmm_hooked_state->audio_size += data_len;
@@ -138,13 +169,34 @@ inline void waveOutput(short* data, DWORD data_len) {
 }
 MMRESULT WINAPI waveOutWriteHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
 	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutWriteProc(ptr, header, size);
-	PostMessage(winmm_hooked_state->message_window, WM_REL_BUF, 0, 0);
+	if (!PostMessage(winmm_hooked_state->message_window, WM_REL_BUF, 0, 0)) {
+		// Ensure BeSTspeech does not wait forever for a buffer release if the
+		// window queue cannot accept the asynchronous notification.
+		winmm_hooked_state->bstRelBuf(winmm_hooked_state->tts);
+		winmm_hooked_state->async_stop_speaking = true;
+		return MMSYSERR_ERROR;
+	}
 	if (winmm_hooked_state->async_stop_speaking) return MMSYSERR_NOERROR; // Callback returned false, drop all remaining buffers.
 	short* data = (short*)header->lpData;
 	DWORD data_len = header->dwBufferLength;
-	if (winmm_hooked_state->sonic_stream && sonicGetSpeed(winmm_hooked_state->sonic_stream) != 1.0f && sonicWriteShortToStream(winmm_hooked_state->sonic_stream, data, data_len / sizeof(short)))
-		data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, data_len) * sizeof(short);
-	waveOutput(data, data_len);
+	if (winmm_hooked_state->sonic_stream && sonicGetSpeed(winmm_hooked_state->sonic_stream) != 1.0f) {
+		if (!sonicWriteShortToStream(winmm_hooked_state->sonic_stream, data, data_len / sizeof(short))) {
+			// Continuing with unprocessed audio would make Rate Boost suddenly
+			// drop to normal speed after a Sonic allocation failure.
+			winmm_hooked_state->async_stop_speaking = true;
+			return MMSYSERR_NOMEM;
+		}
+		// sonicReadShortFromStream takes a sample count, not a byte count. Passing
+		// data_len here allowed Sonic to write up to twice the capacity of the
+		// BeSTspeech-owned 16-bit buffer, intermittently crashing the helper.
+		const DWORD sample_capacity = data_len / sizeof(short);
+		data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, sample_capacity) * sizeof(short);
+	}
+	// Sonic can buffer input without producing output for this callback. A
+	// zero-length block is also the helper protocol's end-of-utterance sentinel,
+	// so forwarding it truncates boosted speech and desynchronizes the next
+	// request. The remaining samples are delivered by a later write or flush.
+	if (data_len) waveOutput(data, data_len);
 	return MMSYSERR_NOERROR;
 }
 MMRESULT WINAPI waveOutUnprepareHeaderHook(HWAVEOUT ptr, WAVEHDR* header, UINT size) {
@@ -158,7 +210,10 @@ MMRESULT WINAPI waveOutResetHook(HWAVEOUT ptr) {
 MMRESULT WINAPI waveOutCloseHook(HWAVEOUT ptr) {
 	if (!winmm_hooked_state || (bst_state*)ptr != winmm_hooked_state) return waveOutCloseProc(ptr);
 	// We need to flush sonic's buffer and feed any remaining output to either the callback or our memory output.
-	if (winmm_hooked_state->sonic_stream) sonicFlushStream(winmm_hooked_state->sonic_stream);
+	if (winmm_hooked_state->sonic_stream && !sonicFlushStream(winmm_hooked_state->sonic_stream)) {
+		winmm_hooked_state->async_stop_speaking = true;
+		return MMSYSERR_NOMEM;
+	}
 	while (winmm_hooked_state->sonic_stream && sonicSamplesAvailable(winmm_hooked_state->sonic_stream)) {
 		short data[1024];
 		DWORD data_len = sonicReadShortFromStream(winmm_hooked_state->sonic_stream, data, 1024) * sizeof(short);
@@ -167,17 +222,22 @@ MMRESULT WINAPI waveOutCloseHook(HWAVEOUT ptr) {
 	return MMSYSERR_NOERROR;
 }
 
-void winmm_hook() {
-	if (winmm_hooked) return;
-	MH_Initialize();
-	MH_CreateHook((LPVOID)waveOutOpen, (LPVOID)waveOutOpenHook, (LPVOID*)&waveOutOpenProc);
-	MH_CreateHook((LPVOID)waveOutPrepareHeader, (LPVOID)waveOutPrepareHeaderHook, (LPVOID*)&waveOutPrepareHeaderProc);
-	MH_CreateHook((LPVOID)waveOutWrite, (LPVOID)waveOutWriteHook, (LPVOID*)&waveOutWriteProc);
-	MH_CreateHook((LPVOID)waveOutUnprepareHeader, (LPVOID)waveOutUnprepareHeaderHook, (LPVOID*)&waveOutUnprepareHeaderProc);
-	MH_CreateHook((LPVOID)waveOutReset, (LPVOID)waveOutResetHook, (LPVOID*)&waveOutResetProc);
-	MH_CreateHook((LPVOID)waveOutClose, (LPVOID)waveOutCloseHook, (LPVOID*)&waveOutCloseProc);
-	MH_EnableHook(MH_ALL_HOOKS);
+bool winmm_hook() {
+	if (winmm_hooked) return true;
+	MH_STATUS status = MH_Initialize();
+	if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
+	if (MH_CreateHook((LPVOID)waveOutOpen, (LPVOID)waveOutOpenHook, (LPVOID*)&waveOutOpenProc) != MH_OK ||
+		MH_CreateHook((LPVOID)waveOutPrepareHeader, (LPVOID)waveOutPrepareHeaderHook, (LPVOID*)&waveOutPrepareHeaderProc) != MH_OK ||
+		MH_CreateHook((LPVOID)waveOutWrite, (LPVOID)waveOutWriteHook, (LPVOID*)&waveOutWriteProc) != MH_OK ||
+		MH_CreateHook((LPVOID)waveOutUnprepareHeader, (LPVOID)waveOutUnprepareHeaderHook, (LPVOID*)&waveOutUnprepareHeaderProc) != MH_OK ||
+		MH_CreateHook((LPVOID)waveOutReset, (LPVOID)waveOutResetHook, (LPVOID*)&waveOutResetProc) != MH_OK ||
+		MH_CreateHook((LPVOID)waveOutClose, (LPVOID)waveOutCloseHook, (LPVOID*)&waveOutCloseProc) != MH_OK ||
+		MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+		MH_Uninitialize();
+		return false;
+	}
 	winmm_hooked = TRUE;
+	return true;
 }
 
 inline void voices_count() {
@@ -190,6 +250,10 @@ inline void voices_count() {
 b32w_export const char** bst_voices(int* count) {
 	voices_count();
 	if (!bst_voices_buf) bst_voices_buf = (const char**) malloc(sizeof(const char*) * (bst_voice_count + 1));
+	if (!bst_voices_buf) {
+		if (count) *count = 0;
+		return nullptr;
+	}
 	for (int i = 0; i < bst_voice_count; i++) bst_voices_buf[i] = bst_voice_data[i * 3];
 	bst_voices_buf[bst_voice_count] = nullptr;
 	if (count) *count = bst_voice_count;
@@ -198,7 +262,11 @@ b32w_export const char** bst_voices(int* count) {
 inline bst_state* bst_init_from_hmodule(HMODULE hmod) {
 	if (!hmod) return nullptr;
 	voices_count();
-	bst_state* s = (bst_state*)malloc(sizeof(bst_state));
+	bst_state* s = (bst_state*)calloc(1, sizeof(bst_state));
+	if (!s) {
+		FreeLibrary(hmod);
+		return nullptr;
+	}
 	s->dll = hmod;
 	s->bstCreate = (bstCreateFunc)GetProcAddress(s->dll, "bstCreate");
 	s->TtsWav = (TtsWavFunc)GetProcAddress(s->dll, "TtsWav");
@@ -210,7 +278,8 @@ inline bst_state* bst_init_from_hmodule(HMODULE hmod) {
 	s->audio = nullptr;
 	s->message_window = nullptr; // We'll create this in the speak function encase the user calls speak on another thread from init.
 	s->sonic_stream = nullptr; // We'll create this the first time a rate multiplier is applied.
-	if (!s->bstCreate || !s->TtsWav || s->bstCreate(s->tts)) {
+	if (!s->bstCreate || !s->TtsWav || !s->bstRelBuf || !s->bstDestroy ||
+		!s->bstClose || !s->bstSetParams || !s->bstGetParams || s->bstCreate(s->tts)) {
 		FreeLibrary(s->dll);
 		free(s);
 		return nullptr;
@@ -234,18 +303,39 @@ b32w_export void bst_free(bst_state* s) {
 	free(s);
 }
 inline void bst_speak_internal(bst_state* s, const char* text, int voice, int rate, float rate_multiplier, int gain) {
+	if (!winmm_hook()) {
+		s->async_stop_speaking = true;
+		return;
+	}
 	if (!s->message_window) s->message_window = create_message_window();
-	if (rate_multiplier != 1.0 && !s->sonic_stream) s->sonic_stream = sonicCreateStream(11025, 1);
+	if (!s->message_window) {
+		s->async_stop_speaking = true;
+		return;
+	}
+	if (!isfinite(rate_multiplier) || rate_multiplier <= 0.0f) {
+		s->async_stop_speaking = true;
+		return;
+	}
+	if (rate_multiplier != 1.0 && !s->sonic_stream) {
+		s->sonic_stream = sonicCreateStream(11025, 1);
+		if (!s->sonic_stream) {
+			s->async_stop_speaking = true;
+			return;
+		}
+	}
 	if (voice >= 0 && voice < bst_voice_count) { // prepend voice prefixes
-		int text_len = strlen(bst_voice_data[voice * 3 + 1]) + strlen(bst_voice_data[voice * 3 + 2]) + strlen(text) + 1;
+		size_t text_len = strlen(bst_voice_data[voice * 3 + 1]) + strlen(bst_voice_data[voice * 3 + 2]) + strlen(text) + 1;
 		char* actual_text = (char*)malloc(text_len);
+		if (!actual_text) {
+			s->async_stop_speaking = true;
+			return;
+		}
 		_snprintf(actual_text, text_len, "%s%s%s", bst_voice_data[voice * 3 + 1], bst_voice_data[voice * 3 + 2], text);
 		text = actual_text;
 	}
 	s->bstSetParams(s->tts, BST_RATE_SETTING, rate * -1); // Bestspeech interprets lower numbers as faster rates.
 	s->bstSetParams(s->tts, BST_GAIN_SETTING, gain);
 	if (s->sonic_stream) sonicSetSpeed(s->sonic_stream, rate_multiplier);
-	winmm_hook();
 	winmm_hooked_state = s;
 	s->TtsWav(s->tts, s, text);
 	winmm_hooked_state = nullptr;
@@ -258,6 +348,12 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	s->async_callback = nullptr;
 	s->async_stop_speaking = false;
 	bst_speak_internal(s, text, voice, rate, rate_multiplier, gain);
+	if (!s->audio || s->async_stop_speaking) {
+		free(s->audio);
+		s->audio = nullptr;
+		if (size) *size = 0;
+		return nullptr;
+	}
 	if (pcm_header) {
 		wav_header* h = (wav_header*)s->audio; // We must correct filesize here.
 		h->wav_size = s->audio_size - 8;
@@ -269,7 +365,7 @@ b32w_export char* bst_speak(bst_state* s, long* size, const char* text, int voic
 	return data;
 }
 b32w_export void bst_speak_async(bst_state* s, bst_async_callback callback, void* user, const char* text, int voice, int rate, float rate_multiplier, int gain) {
-	if (!s || !text) return;
+	if (!s || !callback || !text) return;
 	s->audio = nullptr;
 	s->async_callback = callback;
 	s->async_callback_user = user;
